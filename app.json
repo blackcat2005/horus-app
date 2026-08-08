@@ -1,0 +1,10 @@
+{
+  "expo": {
+    "name": "expo-camera-trigger-app",
+    "slug": "expo-camera-trigger-app",
+    "version": "1.0.0",
+    "sdkVersion": "54.0.0",
+    "platforms": ["ios", "android", "web"],
+    "assetBundlePatterns": ["**/*"]
+  }
+}
