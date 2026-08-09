@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, type ElementRef } from 'react';
+import React, { useEffect, useRef, useState, useCallback, type ElementRef } from 'react';
 import { Alert, Image, Platform, StyleSheet, Text, View } from 'react-native';
 import Constants from 'expo-constants';
 import { Camera, CameraView } from 'expo-camera';
@@ -27,29 +27,7 @@ export default function App() {
     })();
   }, [isWeb]);
 
-  useEffect(() => {
-    const ws = new WebSocket(wsUrl);
-
-    ws.onopen = () => console.log('WebSocket connected', wsUrl);
-    ws.onmessage = async (event) => {
-      if (event.data === 'TAKE_PHOTO') {
-        if (isCameraReady && cameraRef.current) {
-          await handleTakePicture();
-        } else {
-          console.log('Đang chờ camera sẵn sàng để chụp ảnh');
-          setPendingCaptureRequest(true);
-        }
-      }
-    };
-    ws.onerror = (event) => console.error('WebSocket error', event);
-    ws.onclose = () => console.log('WebSocket closed');
-
-    return () => {
-      ws.close();
-    };
-  }, [isCameraReady, wsUrl]);
-
-  const handleTakePicture = async () => {
+  const handleTakePicture = useCallback(async () => {
     if (!cameraRef.current || !isCameraReady) {
       Alert.alert('Camera chưa sẵn sàng');
       return;
@@ -64,13 +42,35 @@ export default function App() {
       console.error(error);
       Alert.alert('Lỗi', 'Không thể chụp ảnh');
     }
-  };
+  }, [cameraRef, isCameraReady]);
+
+  useEffect(() => {
+    const ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => console.log('WebSocket connected', wsUrl);
+    ws.onmessage = async event => {
+      if (event.data === 'TAKE_PHOTO') {
+        if (isCameraReady && cameraRef.current) {
+          await handleTakePicture();
+        } else {
+          console.log('Đang chờ camera sẵn sàng để chụp ảnh');
+          setPendingCaptureRequest(true);
+        }
+      }
+    };
+    ws.onerror = event => console.error('WebSocket error', event);
+    ws.onclose = () => console.log('WebSocket closed');
+
+    return () => {
+      ws.close();
+    };
+  }, [isCameraReady, wsUrl, cameraRef, handleTakePicture]);
 
   useEffect(() => {
     if (pendingCaptureRequest && isCameraReady && cameraRef.current) {
       handleTakePicture();
     }
-  }, [pendingCaptureRequest, isCameraReady]);
+  }, [pendingCaptureRequest, isCameraReady, cameraRef, handleTakePicture]);
 
   if (!isWeb && hasPermission === null) {
     return (
