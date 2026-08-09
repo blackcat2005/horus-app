@@ -2,6 +2,21 @@
 
 Ứng dụng React Native dùng Expo để kết nối WebSocket tới server.
 
+## Requirements
+
+- Có 2 loại devices, 1 là máy controller (đăng nhập trên web và dùng acc role controller), 2 là các máy remote (đăng nhập trên các thiết bị đa nền tảng dùng acc role remote). 
+- Máy controller có chức năng
+   + Tạo 1 project gồm nhiều video quay từ các máy remote gửi lên
+   + Tạo phòng để các máy remote cùng join
+   + Điều khiển các máy remote qua socket, theo dõi các video đang quay
+   + Kết nối với minio để máy remote upload lên minio hoặc thông qua máy controller làm middleware
+- Máy remote có chức năng
+   + Quay phim, chụp ảnh với thiết bị cấu hình thấp
+   + Streaming về máy controller
+   + Upload lên minio
+   + Có thể điều chỉnh các thông số quay như app blackmagic camera
+   + Join vào phòng
+
 ## Thiết lập
 
 1. Sao chép file mẫu:
