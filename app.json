@@ -9,9 +9,30 @@
     },
     "platforms": ["ios", "android", "web"],
     "assetBundlePatterns": ["**/*"],
-    "plugins": ["expo-router"],
+    "plugins": [
+      "expo-router",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Cho phép ứng dụng truy cập camera để chụp ảnh.",
+          "microphonePermission": "Cho phép ứng dụng truy cập micro để quay video."
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Cho phép ứng dụng truy cập thư viện ảnh để lưu ảnh/video.",
+          "savePhotosPermission": "Cho phép ứng dụng lưu ảnh/video vào thư viện ảnh.",
+          "isAccessMediaLocationEnabled": false
+        }
+      ]
+    ],
     "web": {
       "bundler": "metro"
+    },
+    "extra": {
+      "wsHost": "10.136.12.195",
+      "wsPort": "3333"
     }
   }
 }
