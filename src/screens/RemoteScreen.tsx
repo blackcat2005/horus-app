@@ -26,6 +26,7 @@ import { localStore } from '../services/localStore';
 import { getDeviceId } from '../utils/device';
 import { serverConfigService, ServerConfig } from '../services/serverConfig';
 import { colors, spacing, radius } from '../constants/theme';
+import { ENABLE_SOCKET } from '../constants/config';
 
 export default function RemoteScreen() {
   const router = useRouter();
@@ -38,7 +39,7 @@ export default function RemoteScreen() {
   const [photoUri, setPhotoUri] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
-  const [wsConnected, setWsConnected] = useState(false);
+  const [wsConnected, setWsConnected] = useState(!ENABLE_SOCKET);
   const [streamingStats, setStreamingStats] = useState<any>(null);
   const [deviceId, setDeviceId] = useState<string>('');
   const [isSaving, setIsSaving] = useState(false);
@@ -99,6 +100,12 @@ export default function RemoteScreen() {
     // Khởi tạo services
     streamingService.initialize(deviceId);
     localStore.initialize();
+
+    if (!ENABLE_SOCKET) {
+      // Socket tạm tắt — không kết nối, không đăng ký handler
+      return;
+    }
+
     wsService.initialize(wsUrl, deviceId, deviceName.current, 'remote');
 
     // Lắng nghe kết nối WebSocket
@@ -369,10 +376,17 @@ export default function RemoteScreen() {
 
         {/* Status chips */}
         <View style={styles.statusRow}>
-          <View style={[styles.chip, wsConnected ? styles.chipSuccess : styles.chipDanger]}>
-            <View style={[styles.chipDot, wsConnected ? styles.dotSuccess : styles.dotDanger]} />
-            <Text style={styles.chipText}>{wsConnected ? 'Đã kết nối' : 'Chưa kết nối'}</Text>
-          </View>
+          {!ENABLE_SOCKET ? (
+            <View style={[styles.chip, styles.buttonDisabled]}>
+              <View style={[styles.chipDot, styles.dotDanger]} />
+              <Text style={styles.chipText}>Socket tạm tắt</Text>
+            </View>
+          ) : (
+            <View style={[styles.chip, wsConnected ? styles.chipSuccess : styles.chipDanger]}>
+              <View style={[styles.chipDot, wsConnected ? styles.dotSuccess : styles.dotDanger]} />
+              <Text style={styles.chipText}>{wsConnected ? 'Đã kết nối' : 'Chưa kết nối'}</Text>
+            </View>
+          )}
           <View style={[styles.chip, isCameraReady ? styles.chipSuccess : styles.chipDanger]}>
             <View style={[styles.chipDot, isCameraReady ? styles.dotSuccess : styles.dotDanger]} />
             <Text style={styles.chipText}>
@@ -514,6 +528,9 @@ const styles = StyleSheet.create({
   },
   chipDanger: {
     backgroundColor: 'rgba(239, 68, 68, 0.2)',
+  },
+  buttonDisabled: {
+    backgroundColor: colors.border,
   },
   chipDot: {
     width: 8,

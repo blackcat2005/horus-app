@@ -184,7 +184,8 @@ class StreamingService {
   }
 
   /**
-   * Upload file video lên server (Minio). Chạy nền, không chặn UI.
+   * Upload file video lên server theo luồng chunked upload của API v1.
+   * Chạy nền, không chặn UI.
    */
   public async uploadRecording(
     uri: string,
@@ -200,16 +201,33 @@ class StreamingService {
     }
 
     this.lastUploadedUri = uri;
-    const uploaded = await uploadService.uploadVideo(uri, this.deviceId, onProgress);
 
-    wsService.send({
-      type: 'RECORD_END',
-      device_id: this.deviceId,
-      device_type: 'remote',
-      timestamp: Date.now(),
-    });
-
-    return uploaded;
+    try {
+      const fileName = uri.split('/').pop() || `recording_${Date.now()}.mp4`;
+      await uploadService.uploadVideo(
+        uri,
+        {
+          localVideoUid: `${fileName}_${Date.now()}`,
+          deviceId: this.deviceId,
+          cameraName: 'Remote Camera',
+          sessionId: 'standalone',
+          recordedAt: new Date().toISOString(),
+        },
+        onProgress,
+      );
+      return true;
+    } catch (error) {
+      logger.error('Failed to upload recording', error);
+      this.lastUploadedUri = null;
+      return false;
+    } finally {
+      wsService.send({
+        type: 'RECORD_END',
+        device_id: this.deviceId,
+        device_type: 'remote',
+        timestamp: Date.now(),
+      });
+    }
   }
 
   /**

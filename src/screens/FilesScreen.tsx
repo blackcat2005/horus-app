@@ -1,8 +1,10 @@
 /**
  * Files Screen
- * Tab quản lý các file (ảnh/video) đã chụp/quay và lưu trong bộ nhớ local.
- * Tự động làm mới khi tab được focus; hỗ trợ chuyển (copy) file ra thư viện ảnh Photos
- * và upload file lên server.
+ * Quản lý file đã chụp/quay trên máy và thư viện video trên server (API v1).
+ * - Tab "Trên máy": upload video lên server bằng luồng chunked upload,
+ *   chuyển file ra Photos, xóa file local.
+ * - Tab "Trên server": danh sách video từ GET /videos; xem phát lại,
+ *   tải về (chỉ Controller), xóa.
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -10,9 +12,10 @@ import { useFocusEffect } from '@react-navigation/core';
 import {
   ActivityIndicator,
   Alert,
-  FlatList,
   Image,
+  Linking,
   RefreshControl,
+  ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -23,62 +26,62 @@ import { logger } from '../utils/logger';
 import { getDeviceId } from '../utils/device';
 import { localStore, CapturedFile } from '../services/localStore';
 import { uploadService } from '../services/upload';
-import { serverConfigService } from '../services/serverConfig';
+import { authStore } from '../services/authStore';
+import { listVideos, getVideo, deleteVideo, getDownloadUrl } from '../api/videos';
+import { ApiError } from '../api/client';
+import { ServerVideo } from '../api/types';
 import { colors, spacing, radius } from '../constants/theme';
 
-const REFRESH_INTERVAL_MS = 3000;
+type Tab = 'local' | 'server';
 
 export default function FilesScreen() {
   const [deviceId, setDeviceId] = useState<string>('');
+  const [tab, setTab] = useState<Tab>('local');
+
   const [files, setFiles] = useState<CapturedFile[]>([]);
   const [loading, setLoading] = useState(true);
   const [exportingId, setExportingId] = useState<string | null>(null);
   const [uploadingId, setUploadingId] = useState<string | null>(null);
   const [uploadProgress, setUploadProgress] = useState(0);
 
-  const doLoad = useCallback(async (): Promise<void> => {
-    const list = await localStore.listCapturedFiles();
-    setFiles(list);
-  }, []);
+  const [videos, setVideos] = useState<ServerVideo[]>([]);
+  const [serverLoading, setServerLoading] = useState(false);
+  const [serverError, setServerError] = useState<string | null>(null);
+  const [isController, setIsController] = useState(false);
 
   useEffect(() => {
     localStore.initialize();
-
-    // Khởi tạo uploadService theo cấu hình server đã lưu (tự cập nhật khi đổi cấu hình)
-    serverConfigService.load().then(config => {
-      uploadService.initialize(serverConfigService.httpUrl(config));
-    });
-    const unsubscribe = serverConfigService.subscribe(config => {
-      uploadService.initialize(serverConfigService.httpUrl(config));
-    });
-
     getDeviceId().then(id => setDeviceId(id));
-
-    let mounted = true;
-    const load = async () => {
-      const list = await localStore.listCapturedFiles();
-      if (mounted) {
-        setFiles(list);
-        setLoading(false);
-      }
-    };
-    load();
-
-    return () => {
-      mounted = false;
-      unsubscribe();
-    };
+    authStore.load().then(session => setIsController(session?.accountRole === 'controller'));
   }, []);
 
-  // Tự động làm mới danh sách khi tab được focus + poll định kỳ
+  const doLoad = useCallback(async (): Promise<void> => {
+    const list = await localStore.listCapturedFiles();
+    setFiles(list);
+    setLoading(false);
+  }, []);
+
+  const loadServerVideos = useCallback(async (): Promise<void> => {
+    setServerLoading(true);
+    setServerError(null);
+    try {
+      const data = await listVideos({ index: 0, count: 50 });
+      setVideos(data.videos || []);
+    } catch (error) {
+      logger.error('Failed to load server videos', error);
+      setServerError(error instanceof ApiError ? error.message : 'Không tải được danh sách video');
+    } finally {
+      setServerLoading(false);
+    }
+  }, []);
+
   useFocusEffect(
     useCallback(() => {
       doLoad();
-      const interval = setInterval(() => {
-        doLoad();
-      }, REFRESH_INTERVAL_MS);
-      return () => clearInterval(interval);
-    }, [doLoad]),
+      if (tab === 'server') {
+        loadServerVideos();
+      }
+    }, [doLoad, tab, loadServerVideos]),
   );
 
   const handleExport = useCallback(
@@ -106,6 +109,13 @@ export default function FilesScreen() {
   const handleUpload = useCallback(
     async (file: CapturedFile) => {
       if (uploadingId) return;
+      if (file.type !== 'video') {
+        Alert.alert(
+          'Chưa hỗ trợ',
+          'API v1 hiện chỉ nhận video mp4. Ảnh vui lòng xuất sang Photos.',
+        );
+        return;
+      }
       if (!deviceId) {
         Alert.alert('Lỗi', 'Chưa có device ID');
         return;
@@ -115,21 +125,29 @@ export default function FilesScreen() {
       setUploadProgress(0);
 
       try {
-        const uploaded =
-          file.type === 'photo'
-            ? await uploadService.uploadPhoto(file.localUri, deviceId, p => setUploadProgress(p))
-            : await uploadService.uploadVideo(file.localUri, deviceId, p => setUploadProgress(p));
+        const result = await uploadService.uploadVideo(
+          file.localUri,
+          {
+            localVideoUid: file.id,
+            deviceId,
+            cameraName: 'Remote Camera',
+            sessionId: 'standalone',
+            recordedAt: new Date(file.createdAt).toISOString(),
+          },
+          p => setUploadProgress(p),
+        );
 
-        if (uploaded) {
-          await localStore.markUploaded(file.id);
-          await doLoad();
-          Alert.alert('Đã upload', `${file.fileName} đã được upload lên server.`);
-        } else {
-          Alert.alert('Lỗi', `Upload ${file.fileName} lên server thất bại.`);
-        }
+        await localStore.markUploaded(file.id);
+        await doLoad();
+        Alert.alert(
+          'Đã upload',
+          `${file.fileName} đã nằm trên server${result.videoId ? ` (video_id: ${result.videoId})` : ''}.`,
+        );
       } catch (error) {
-        logger.error('Failed to upload file', error);
-        Alert.alert('Lỗi', 'Không thể upload file lên server.');
+        logger.error('Failed to upload video', error);
+        const message =
+          error instanceof ApiError ? `${error.message} (mã ${error.code})` : 'Upload thất bại.';
+        Alert.alert('Lỗi upload', message);
       } finally {
         setUploadingId(null);
       }
@@ -137,7 +155,7 @@ export default function FilesScreen() {
     [uploadingId, deviceId, doLoad],
   );
 
-  const handleDelete = useCallback(
+  const handleDeleteLocal = useCallback(
     (file: CapturedFile) => {
       Alert.alert('Xóa file', `Xóa ${file.fileName} khỏi bộ nhớ?`, [
         { text: 'Hủy', style: 'cancel' },
@@ -159,45 +177,91 @@ export default function FilesScreen() {
     [doLoad],
   );
 
+  const handlePlay = useCallback(async (video: ServerVideo) => {
+    try {
+      const detail = await getVideo(video.id);
+      await Linking.openURL(detail.url);
+    } catch (error) {
+      logger.error('Failed to open video url', error);
+      Alert.alert('Lỗi', 'Không mở được đường dẫn phát video.');
+    }
+  }, []);
+
+  const handleDownload = useCallback(async (video: ServerVideo) => {
+    try {
+      const data = await getDownloadUrl(video.id);
+      await Linking.openURL(data.download_url);
+    } catch (error) {
+      logger.error('Failed to get download url', error);
+      const message =
+        error instanceof ApiError && error.code === 1009
+          ? 'Chỉ tài khoản Controller mới được tải clip.'
+          : 'Không lấy được link tải.';
+      Alert.alert('Lỗi', message);
+    }
+  }, []);
+
+  const handleDeleteServer = useCallback(
+    (video: ServerVideo) => {
+      Alert.alert('Xóa video', `Xóa "${video.name || video.id}" trên server?`, [
+        { text: 'Hủy', style: 'cancel' },
+        {
+          text: 'Xóa',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await deleteVideo(video.id);
+              await loadServerVideos();
+            } catch (error) {
+              Alert.alert('Lỗi', error instanceof ApiError ? error.message : 'Xóa thất bại.');
+            }
+          },
+        },
+      ]);
+    },
+    [loadServerVideos],
+  );
+
   const onRefresh = useCallback(async () => {
-    await doLoad();
-  }, [doLoad]);
+    if (tab === 'local') {
+      await doLoad();
+    } else {
+      await loadServerVideos();
+    }
+  }, [tab, doLoad, loadServerVideos]);
 
-  const photos = files.filter(f => f.type === 'photo');
-  const videos = files.filter(f => f.type === 'video');
+  const renderLocalItem = (item: CapturedFile) => {
+    const isPhoto = item.type === 'photo';
+    const date = new Date(item.createdAt).toLocaleString();
+    const isExporting = exportingId === item.id;
+    const isUploading = uploadingId === item.id;
 
-  const renderItem = useCallback(
-    ({ item }: { item: CapturedFile }) => {
-      const isPhoto = item.type === 'photo';
-      const date = new Date(item.createdAt).toLocaleString();
-      const isExporting = exportingId === item.id;
-      const isUploading = uploadingId === item.id;
+    return (
+      <View key={item.id} style={styles.fileRow}>
+        {isPhoto ? (
+          <Image source={{ uri: item.localUri }} style={styles.fileThumb} resizeMode="cover" />
+        ) : (
+          <View style={[styles.fileThumb, styles.videoThumb]}>
+            <Text style={styles.fileThumbIcon}>🎬</Text>
+          </View>
+        )}
 
-      return (
-        <View style={styles.fileRow}>
-          {isPhoto ? (
-            <Image source={{ uri: item.localUri }} style={styles.fileThumb} resizeMode="cover" />
-          ) : (
-            <View style={[styles.fileThumb, styles.videoThumb]}>
-              <Text style={styles.fileThumbIcon}>🎬</Text>
+        <View style={styles.fileInfo}>
+          <Text style={styles.fileName} numberOfLines={1}>
+            {item.fileName}
+          </Text>
+          <Text style={styles.fileMeta}>
+            {date} · {formatSize(item.size)}
+          </Text>
+          {item.uploaded && (
+            <View style={styles.uploadedBadge}>
+              <Text style={styles.uploadedTag}>✓ Đã upload lên server</Text>
             </View>
           )}
+        </View>
 
-          <View style={styles.fileInfo}>
-            <Text style={styles.fileName} numberOfLines={1}>
-              {item.fileName}
-            </Text>
-            <Text style={styles.fileMeta}>
-              {date} · {formatSize(item.size)}
-            </Text>
-            {item.uploaded && (
-              <View style={styles.uploadedBadge}>
-                <Text style={styles.uploadedTag}>✓ Đã upload lên server</Text>
-              </View>
-            )}
-          </View>
-
-          <View style={styles.actions}>
+        <View style={styles.actions}>
+          {!isPhoto && (
             <TouchableOpacity
               style={[
                 styles.actionButton,
@@ -214,47 +278,60 @@ export default function FilesScreen() {
                     : '⬆️ Upload'}
               </Text>
             </TouchableOpacity>
+          )}
+          <TouchableOpacity
+            style={[styles.actionButton, styles.exportButton, isExporting && styles.buttonDisabled]}
+            onPress={() => handleExport(item)}
+            disabled={!!exportingId}>
+            <Text style={styles.actionButtonText}>
+              {isExporting ? 'Đang chuyển...' : '📂 Photos'}
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.deleteButton} onPress={() => handleDeleteLocal(item)}>
+            <Text style={styles.actionButtonText}>🗑️</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  };
+
+  const renderServerItem = (video: ServerVideo) => {
+    const date = video.created_at ? new Date(video.created_at).toLocaleString() : '';
+    return (
+      <View key={video.id} style={styles.fileRow}>
+        <View style={[styles.fileThumb, styles.videoThumb]}>
+          <Text style={styles.fileThumbIcon}>☁️</Text>
+        </View>
+
+        <View style={styles.fileInfo}>
+          <Text style={styles.fileName} numberOfLines={1}>
+            {video.name || video.camera_name || video.local_video_uid || video.id}
+          </Text>
+          <Text style={styles.fileMeta}>
+            {[date, formatSize(video.size), video.camera_name].filter(Boolean).join(' · ')}
+          </Text>
+        </View>
+
+        <View style={styles.actions}>
+          <TouchableOpacity
+            style={[styles.actionButton, styles.uploadButton]}
+            onPress={() => handlePlay(video)}>
+            <Text style={styles.actionButtonText}>▶ Xem</Text>
+          </TouchableOpacity>
+          {isController && (
             <TouchableOpacity
-              style={[
-                styles.actionButton,
-                styles.exportButton,
-                isExporting && styles.buttonDisabled,
-              ]}
-              onPress={() => handleExport(item)}
-              disabled={!!exportingId}>
-              <Text style={styles.actionButtonText}>
-                {isExporting ? 'Đang chuyển...' : '📂 Vào Photos'}
-              </Text>
+              style={[styles.actionButton, styles.exportButton]}
+              onPress={() => handleDownload(video)}>
+              <Text style={styles.actionButtonText}>⬇ Tải</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.deleteButton} onPress={() => handleDelete(item)}>
-              <Text style={styles.actionButtonText}>🗑️</Text>
-            </TouchableOpacity>
-          </View>
+          )}
+          <TouchableOpacity style={styles.deleteButton} onPress={() => handleDeleteServer(video)}>
+            <Text style={styles.actionButtonText}>🗑️</Text>
+          </TouchableOpacity>
         </View>
-      );
-    },
-    [exportingId, uploadingId, uploadProgress, handleUpload, handleExport, handleDelete],
-  );
-
-  const renderSection = useCallback(
-    (title: string, items: CapturedFile[]) => {
-      if (items.length === 0) return null;
-      return (
-        <View>
-          <Text style={styles.sectionHeader}>{title}</Text>
-          {items.map(item => (
-            <View key={item.id}>{renderItem({ item })}</View>
-          ))}
-        </View>
-      );
-    },
-    [renderItem],
-  );
-
-  const sections = [
-    { key: 'photos', title: 'Ảnh đã lưu', items: photos },
-    { key: 'videos', title: 'Video đã lưu', items: videos },
-  ];
+      </View>
+    );
+  };
 
   if (loading) {
     return (
@@ -265,36 +342,82 @@ export default function FilesScreen() {
     );
   }
 
+  const photos = files.filter(f => f.type === 'photo');
+  const videosLocal = files.filter(f => f.type === 'video');
+
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>Files đã lưu trên thiết bị</Text>
-        <View style={styles.headerSubRow}>
-          <Text style={styles.headerSub}>
-            Bấm Upload để gửi file lên server, &quot;Vào Photos&quot; để chuyển ra thư viện ảnh.
-          </Text>
-          <TouchableOpacity
-            onPress={() => onRefresh()}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+        <View style={styles.headerTopRow}>
+          <Text style={styles.headerTitle}>Files</Text>
+          <TouchableOpacity onPress={onRefresh} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
             <Text style={styles.refreshLink}>⟳ Làm mới</Text>
+          </TouchableOpacity>
+        </View>
+        <View style={styles.tabRow}>
+          <TouchableOpacity
+            style={[styles.tabButton, tab === 'local' && styles.tabActive]}
+            onPress={() => setTab('local')}>
+            <Text style={[styles.tabText, tab === 'local' && styles.tabTextActive]}>Trên máy</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.tabButton, tab === 'server' && styles.tabActive]}
+            onPress={() => {
+              setTab('server');
+              loadServerVideos();
+            }}>
+            <Text style={[styles.tabText, tab === 'server' && styles.tabTextActive]}>
+              Trên server
+            </Text>
           </TouchableOpacity>
         </View>
       </View>
 
-      <FlatList
-        data={sections}
-        keyExtractor={item => item.key}
-        renderItem={({ item }) => renderSection(item.title, item.items)}
-        refreshControl={<RefreshControl refreshing={false} onRefresh={onRefresh} />}
+      <ScrollView
         contentContainerStyle={styles.listContent}
-        ListEmptyComponent={
-          <View style={styles.center}>
-            <Text style={styles.emptyText}>
-              Chưa có file nào. Hãy chụp ảnh hoặc quay video trong tab Camera.
-            </Text>
-          </View>
-        }
-      />
+        refreshControl={<RefreshControl refreshing={false} onRefresh={onRefresh} />}>
+        {tab === 'local' ? (
+          <>
+            {photos.length > 0 && (
+              <Text style={styles.sectionHeader}>Ảnh đã lưu ({photos.length})</Text>
+            )}
+            {photos.map(renderLocalItem)}
+            {videosLocal.length > 0 && (
+              <Text style={styles.sectionHeader}>Video đã lưu ({videosLocal.length})</Text>
+            )}
+            {videosLocal.map(renderLocalItem)}
+            {files.length === 0 && (
+              <View style={styles.center}>
+                <Text style={styles.emptyText}>
+                  Chưa có file nào. Hãy chụp ảnh hoặc quay video trong tab Camera.
+                </Text>
+              </View>
+            )}
+          </>
+        ) : (
+          <>
+            {serverLoading ? (
+              <ActivityIndicator color={colors.primary} style={styles.serverSpinner} />
+            ) : serverError ? (
+              <View style={styles.center}>
+                <Text style={styles.errorText}>{serverError}</Text>
+              </View>
+            ) : videos.length === 0 ? (
+              <View style={styles.center}>
+                <Text style={styles.emptyText}>Chưa có video nào trên server.</Text>
+              </View>
+            ) : (
+              <>
+                <Text style={styles.sectionHeader}>
+                  Video trên server ({videos.length})
+                  {isController ? ' · Controller: thấy tất cả' : ''}
+                </Text>
+                {videos.map(renderServerItem)}
+              </>
+            )}
+          </>
+        )}
+      </ScrollView>
     </View>
   );
 }
@@ -329,26 +452,48 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
   },
+  headerTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
   headerTitle: {
     fontSize: 22,
     fontWeight: 'bold',
     color: colors.text,
   },
-  headerSubRow: {
-    marginTop: spacing.xs,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  headerSub: {
-    fontSize: 12,
-    color: colors.textSecondary,
-    flex: 1,
-    marginRight: spacing.sm,
-  },
   refreshLink: {
     color: colors.primary,
     fontWeight: 'bold',
+  },
+  tabRow: {
+    flexDirection: 'row',
+    marginTop: spacing.md,
+    backgroundColor: colors.background,
+    borderRadius: radius.md,
+    padding: 3,
+  },
+  tabButton: {
+    flex: 1,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.sm,
+    alignItems: 'center',
+  },
+  tabActive: {
+    backgroundColor: colors.surface,
+    shadowColor: '#000',
+    shadowOpacity: 0.06,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 1 },
+    elevation: 1,
+  },
+  tabText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: colors.textSecondary,
+  },
+  tabTextActive: {
+    color: colors.primary,
   },
   listContent: {
     padding: spacing.lg,
@@ -358,7 +503,7 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: 'bold',
     color: colors.text,
-    marginTop: spacing.lg,
+    marginTop: spacing.md,
     marginBottom: spacing.sm,
   },
   fileRow: {
@@ -455,5 +600,13 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: colors.textMuted,
     textAlign: 'center',
+  },
+  errorText: {
+    fontSize: 13,
+    color: colors.dangerDark,
+    textAlign: 'center',
+  },
+  serverSpinner: {
+    marginTop: spacing.xl,
   },
 });

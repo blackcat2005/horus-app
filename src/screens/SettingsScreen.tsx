@@ -20,6 +20,8 @@ import {
 
 import { colors, spacing, radius } from '../constants/theme';
 import { serverConfigService } from '../services/serverConfig';
+import { authStore } from '../services/authStore';
+import { logout } from '../api/auth';
 import { getDeviceId } from '../utils/device';
 import { logger } from '../utils/logger';
 
@@ -31,6 +33,9 @@ export default function SettingsScreen() {
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<string | null>(null);
+  const [account, setAccount] = useState<{ name: string; role: string; phone: string } | null>(
+    null,
+  );
 
   useEffect(() => {
     serverConfigService.load().then(config => {
@@ -39,6 +44,29 @@ export default function SettingsScreen() {
       setIsLoading(false);
     });
     getDeviceId().then(setDeviceId);
+    authStore.load().then(session => {
+      if (session) {
+        const { user, accountRole } = session;
+        setAccount({
+          name: [user.first_name, user.last_name].filter(Boolean).join(' ') || user.email,
+          role: accountRole === 'controller' ? 'Controller' : 'Remote',
+          phone: user.phone || user.email,
+        });
+      }
+    });
+  }, []);
+
+  const handleLogout = useCallback(() => {
+    Alert.alert('Đăng xuất', 'Bạn muốn đăng xuất khỏi tài khoản này?', [
+      { text: 'Hủy', style: 'cancel' },
+      {
+        text: 'Đăng xuất',
+        style: 'destructive',
+        onPress: async () => {
+          await logout();
+        },
+      },
+    ]);
   }, []);
 
   const handleSave = useCallback(async () => {
@@ -78,10 +106,11 @@ export default function SettingsScreen() {
     const timeout = setTimeout(() => controller.abort(), 5000);
 
     try {
-      const url = `http://${trimmedHost}:${trimmedPort}/api/minio/status`;
+      const url = `http://${trimmedHost}:${trimmedPort}/health`;
       const response = await fetch(url, { signal: controller.signal });
       if (response.ok) {
-        setTestResult('success');
+        const body = await response.json().catch(() => null);
+        setTestResult(body?.data?.status === 'up' ? 'success' : 'fail');
       } else {
         setTestResult('fail');
       }
@@ -131,7 +160,7 @@ export default function SettingsScreen() {
                 style={styles.input}
                 value={port}
                 onChangeText={setPort}
-                placeholder="VD: 3333"
+                placeholder="VD: 3000"
                 placeholderTextColor={colors.textMuted}
                 autoCapitalize="none"
                 autoCorrect={false}
@@ -174,6 +203,33 @@ export default function SettingsScreen() {
                 </View>
               )}
             </View>
+
+            {account && (
+              <View style={styles.infoCard}>
+                <Text style={styles.infoTitle}>Tài khoản</Text>
+                <View style={styles.infoRow}>
+                  <Text style={styles.infoLabel}>Tên</Text>
+                  <Text style={styles.infoValue} numberOfLines={1}>
+                    {account.name}
+                  </Text>
+                </View>
+                <View style={[styles.infoRow, styles.infoRowGap]}>
+                  <Text style={styles.infoLabel}>Vai trò</Text>
+                  <Text style={styles.infoValue}>{account.role}</Text>
+                </View>
+                <View style={[styles.infoRow, styles.infoRowGap]}>
+                  <Text style={styles.infoLabel}>Liên hệ</Text>
+                  <Text style={styles.infoValue} numberOfLines={1}>
+                    {account.phone}
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  style={[styles.button, styles.logoutButton]}
+                  onPress={handleLogout}>
+                  <Text style={styles.buttonText}>🚪 Đăng xuất</Text>
+                </TouchableOpacity>
+              </View>
+            )}
 
             <View style={styles.infoCard}>
               <Text style={styles.infoTitle}>Thông tin thiết bị</Text>
@@ -328,6 +384,12 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     marginTop: spacing.md,
     lineHeight: 18,
+  },
+  infoRowGap: {
+    marginTop: spacing.md,
+  },
+  logoutButton: {
+    backgroundColor: colors.danger,
   },
   loadingBox: {
     paddingVertical: spacing.xl,

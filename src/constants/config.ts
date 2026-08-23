@@ -3,6 +3,8 @@
  */
 
 // WebSocket Configuration
+// Tạm tắt socket (multicam-server v1 chưa có WS). Bật lại = true.
+export const ENABLE_SOCKET = false;
 export const WS_RECONNECT_INTERVAL = 3000; // ms
 export const WS_HEARTBEAT_INTERVAL = 30000; // ms
 export const WS_MESSAGE_TIMEOUT = 10000; // ms

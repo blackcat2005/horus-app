@@ -16,8 +16,8 @@ export interface ServerConfig {
 const STORAGE_KEY = 'server_config';
 
 export const DEFAULT_SERVER_CONFIG: ServerConfig = {
-  host: Constants.expoConfig?.extra?.wsHost ?? '192.168.1.102',
-  port: Constants.expoConfig?.extra?.wsPort ?? '3333',
+  host: Constants.expoConfig?.extra?.wsHost ?? '192.168.1.101',
+  port: Constants.expoConfig?.extra?.wsPort ?? '3000',
 };
 
 type Listener = (config: ServerConfig) => void;
@@ -99,6 +99,13 @@ class ServerConfigService {
 
   public httpUrl(config: ServerConfig): string {
     return `http://${config.host}:${config.port}`;
+  }
+
+  /**
+   * Base URL của API v1 trên multicam-server
+   */
+  public apiUrl(config: ServerConfig): string {
+    return `${this.httpUrl(config)}/it4788/api/v1`;
   }
 }
 
