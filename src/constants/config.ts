@@ -3,11 +3,23 @@
  */
 
 // WebSocket Configuration
-// Tạm tắt socket (multicam-server v1 chưa có WS). Bật lại = true.
-export const ENABLE_SOCKET = false;
+// ENABLE_SOCKET cho live WS base64 tới server demo 3333 (chạy được trên Expo Go, không cần webrtc)
+export const ENABLE_SOCKET = true;
+// LIVE_WS_PORT riêng cho server demo cũ (3333) — khác API port 3000 của multicam-server
+export const LIVE_WS_PORT = '3333';
 export const WS_RECONNECT_INTERVAL = 3000; // ms
 export const WS_HEARTBEAT_INTERVAL = 30000; // ms
 export const WS_MESSAGE_TIMEOUT = 10000; // ms
+
+// Polling intervals theo Docs (next_sync_in 3s khi recording, 5s khi idle)
+export const DEVICE_SYNC_INTERVAL_IDLE = 5000;
+export const DEVICE_SYNC_INTERVAL_RECORDING = 3000;
+export const ROOM_SYNC_INTERVAL_IDLE = 5000;
+export const ROOM_SYNC_INTERVAL_RECORDING = 3000;
+
+// Mediasoup preview defaults
+export const DEFAULT_PREVIEW_QUALITY: 'low' | 'medium' = 'low';
+export const DEFAULT_PREVIEW_PROTOCOL: 'hls' | 'webrtc' = 'webrtc';
 
 // Camera Configuration
 export const CAMERA_PHOTO_QUALITY = 0.8; // 0-1

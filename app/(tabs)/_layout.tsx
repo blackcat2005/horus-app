@@ -32,6 +32,13 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
+        name="controller"
+        options={{
+          title: 'Phòng',
+          tabBarIcon: ({ focused }) => <TabIcon label="🎛️" focused={focused} />,
+        }}
+      />
+      <Tabs.Screen
         name="settings"
         options={{
           title: 'Cài đặt',

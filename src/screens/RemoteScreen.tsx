@@ -10,6 +10,7 @@ import {
   Platform,
   StyleSheet,
   Text,
+  TextInput,
   View,
   ActivityIndicator,
   TouchableOpacity,
@@ -27,6 +28,12 @@ import { getDeviceId } from '../utils/device';
 import { serverConfigService, ServerConfig } from '../services/serverConfig';
 import { colors, spacing, radius } from '../constants/theme';
 import { ENABLE_SOCKET } from '../constants/config';
+import { useDeviceSync } from '../hooks/useDeviceSync';
+import { useAuthSession } from '../hooks/useAuthSession';
+import { mediasoupClientService } from '../services/mediasoupClient';
+import { deviceSyncService } from '../services/deviceSync';
+import { joinRoom, leaveRoom } from '../api/rooms';
+import { ApiError } from '../api/client';
 
 export default function RemoteScreen() {
   const router = useRouter();
@@ -44,6 +51,10 @@ export default function RemoteScreen() {
   const [deviceId, setDeviceId] = useState<string>('');
   const [isSaving, setIsSaving] = useState(false);
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
+  const [isPreviewing, setIsPreviewing] = useState(false);
+  const [roomIdForPreview, setRoomIdForPreview] = useState<string | null>(null);
+  const [inviteInput, setInviteInput] = useState('');
+  const [joinLog, setJoinLog] = useState<string[]>([]);
 
   const cameraRef = useRef<CameraView | null>(null);
 
@@ -62,12 +73,29 @@ export default function RemoteScreen() {
     return serverConfigService.subscribe(setServerConfig);
   }, []);
 
-  const wsUrl = serverConfig ? serverConfigService.wsUrl(serverConfig) : '';
+  const wsUrl = serverConfig ? serverConfigService.liveWsUrl(serverConfig) : '';
+  const apiWsUrl = serverConfig ? serverConfigService.wsUrl(serverConfig) : '';
 
   // Nạp deviceId cố định
   useEffect(() => {
     getDeviceId().then(id => setDeviceId(id));
   }, []);
+
+  // Polling sync_device theo API Docs v1 (3-5s) — nhận lệnh quay từ Controller
+  const { session } = useAuthSession();
+  const isRemote = session?.accountRole === 'remote';
+  useDeviceSync(deviceId, { enabled: !!deviceId && !!session && isRemote });
+
+  // Theo dõi room_status để hiện nút preview mediasoup
+  useEffect(() => {
+    deviceSyncService.onRoomStatusChange(s => {
+      setRoomIdForPreview(s.in_room ? s.room_id : null);
+      if (!s.in_room && isPreviewing) {
+        mediasoupClientService.disconnect();
+        setIsPreviewing(false);
+      }
+    });
+  }, [isPreviewing]);
 
   // Yêu cầu quyền Camera khi component mount
   useEffect(() => {
@@ -416,6 +444,28 @@ export default function RemoteScreen() {
             <Text style={styles.alertTitle}>💾 Đang lưu vào bộ nhớ...</Text>
           </View>
         )}
+        {roomIdForPreview ? (
+          <View style={[styles.alertBox, { backgroundColor: isPreviewing ? 'rgba(16,185,129,0.28)' : 'rgba(148,163,184,0.25)' }]}>
+            <Text style={styles.alertTitle}>{isPreviewing ? '📡 Đang phát mediasoup' : '📡 Đã join phòng'} · {roomIdForPreview.slice(0, 6)}</Text>
+            <TouchableOpacity style={{ marginTop: 8, backgroundColor: 'rgba(239,68,68,0.9)', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8, alignSelf: 'flex-start' }} onPress={async () => { try{ await leaveRoom(roomIdForPreview); setRoomIdForPreview(null); Alert.alert('Đã rời phòng'); } catch(e:any){ Alert.alert('Lỗi rời phòng', String(e.message||e)); } }}>
+              <Text style={{ color: '#fff', fontWeight: '700', fontSize: 12 }}>Rời phòng</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <View style={[styles.alertBox, { backgroundColor: 'rgba(37,99,235,0.18)' }]}>
+            <Text style={styles.alertTitle}>🔑 Nhập mã mời để join phòng</Text>
+            <Text style={styles.alertSub}>Lấy mã từ dashboard http://localhost:3000 → Phòng → copy Mã mời (TTL 10 phút)</Text>
+            <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
+              <TextInput value={inviteInput} onChangeText={t => setInviteInput(t.toUpperCase())} placeholder="ABCD12" placeholderTextColor="rgba(255,255,255,0.6)" autoCapitalize="characters" maxLength={12} style={{ flex: 1, backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 8, color: '#fff', fontFamily: 'monospace', borderWidth: 1, borderColor: 'rgba(255,255,255,0.3)' }} />
+              <TouchableOpacity style={{ backgroundColor: deviceId ? '#10b981' : '#64748b', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8, justifyContent: 'center' }} disabled={!deviceId} onPress={async () => {
+                const code = inviteInput.trim(); if(!code) return Alert.alert('Thiếu mã mời'); if(!deviceId) return Alert.alert('Chưa có deviceId'); try{ logger.info('Remote joinRoom attempt', { code, deviceId }); const r = await joinRoom({ invite_code: code, device_id: deviceId, camera_name: 'Remote-'+deviceId.slice(0,4), grant_control: true }); setRoomIdForPreview(r.room_id); setJoinLog(p=>[...p.slice(-5), `${new Date().toLocaleTimeString()} OK ${code} -> ${r.room_id.slice(0,8)}`]); Alert.alert('Đã join', r.room_id); } catch(e:any){ const codeErr = e instanceof ApiError ? e.code : 0; const msg = e?.message || String(e); const detail = `[${codeErr}] ${msg} invite=${code} dev=${deviceId.slice(0,8)}`; logger.error('Remote joinRoom failed', { detail }); setJoinLog(p=>[...p.slice(-5), `${new Date().toLocaleTimeString()} FAIL ${detail}`]); if(codeErr===9992) Alert.alert('Mã mời hết hạn', `${msg}\n\nMã ${code} đã hết hạn hoặc không tồn tại (TTL 10 phút). Yêu cầu Controller mở app tab "Phòng" hoặc web dashboard bấm "Mã mới" để lấy mã mới.`); else Alert.alert('Join lỗi', detail); }
+              }}>
+                <Text style={{ color: '#fff', fontWeight: '700' }}>Join</Text>
+              </TouchableOpacity>
+            </View>
+            {joinLog.map((l,i)=><Text key={i} style={[styles.alertSub,{fontFamily:'monospace',marginTop:4}]}>{l}</Text>)}
+          </View>
+        )}
       </View>
 
       {/* Preview ảnh vừa chụp - thumbnail nhỏ ở góc, bấm vào để đóng */}
@@ -426,8 +476,37 @@ export default function RemoteScreen() {
         </TouchableOpacity>
       )}
 
-      {/* Footer Controls */}
+      {/* Footer Controls — Expo Go live WS (không cần webrtc) + mediasoup preview (cần dev-client) */}
       <View style={[styles.footer, { paddingBottom: insets.bottom + spacing.xl }]}>
+        {ENABLE_SOCKET && (
+          <TouchableOpacity
+            style={[styles.footerButton, isStreaming ? { backgroundColor: colors.danger } : { backgroundColor: wsConnected ? '#0ea5e9' : '#64748b' }]}
+            onPress={isStreaming ? handleStopStreaming : handleStartStreaming}
+            disabled={!isCameraReady || !wsConnected}>
+            <Text style={styles.footerButtonIcon}>{isStreaming ? '⏹' : '📡'}</Text>
+            <Text style={styles.footerButtonText}>{isStreaming ? 'Ngừng Live' : wsConnected ? 'Live WS → 3333' : 'Chưa nối WS'}</Text>
+          </TouchableOpacity>
+        )}
+        {roomIdForPreview && Platform.OS !== 'web' && (
+          <TouchableOpacity
+            style={[styles.footerButton, isPreviewing ? { backgroundColor: colors.success } : { backgroundColor: '#334155' }]}
+            onPress={async () => {
+              if (isPreviewing) {
+                mediasoupClientService.disconnect();
+                setIsPreviewing(false);
+              } else {
+                try {
+                  await mediasoupClientService.startProducing(roomIdForPreview);
+                  setIsPreviewing(true);
+                } catch (e) {
+                  Alert.alert('Preview lỗi', String(e instanceof Error ? e.message : e));
+                }
+              }
+            }}>
+            <Text style={styles.footerButtonIcon}>{isPreviewing ? '📡' : '👁️'}</Text>
+            <Text style={styles.footerButtonText}>{isPreviewing ? 'Ngắt preview' : 'Phát preview'}</Text>
+          </TouchableOpacity>
+        )}
         <TouchableOpacity
           style={[styles.footerButton, styles.footerPhoto, isSaving && styles.footerDisabled]}
           onPress={handleTakePicture}

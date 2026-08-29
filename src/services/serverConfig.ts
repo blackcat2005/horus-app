@@ -97,6 +97,12 @@ class ServerConfigService {
     return `ws://${config.host}:${config.port}`;
   }
 
+  public liveWsUrl(config: ServerConfig): string {
+    // Live WS base64 tới server demo 3333 — dùng host từ API config nhưng port LIVE_WS_PORT
+    const livePort = (Constants.expoConfig?.extra as any)?.liveWsPort ?? '3333';
+    return `ws://${config.host}:${livePort}`;
+  }
+
   public httpUrl(config: ServerConfig): string {
     return `http://${config.host}:${config.port}`;
   }

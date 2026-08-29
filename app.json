@@ -7,8 +7,14 @@
     "experiments": {
       "typedRoutes": true
     },
-    "platforms": ["ios", "android", "web"],
-    "assetBundlePatterns": ["**/*"],
+    "platforms": [
+      "ios",
+      "android",
+      "web"
+    ],
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "plugins": [
       "expo-router",
       [
@@ -27,12 +33,37 @@
         }
       ]
     ],
+    "android": {
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_MEDIA_VIDEO",
+        "android.permission.READ_MEDIA_AUDIO"
+      ],
+      "package": "com.coder_vuitinh_2005.expocameratriggerapp"
+    },
+    "ios": {
+      "infoPlist": {
+        "NSCameraUsageDescription": "Cho phép ứng dụng truy cập camera để preview mediasoup.",
+        "NSMicrophoneUsageDescription": "Cho phép ứng dụng truy cập micro để preview mediasoup."
+      }
+    },
     "web": {
       "bundler": "metro"
     },
     "extra": {
       "wsHost": "192.168.1.101",
-      "wsPort": "3000"
+      "wsPort": "3000",
+      "liveWsPort": "3333",
+      "router": {},
+      "eas": {
+        "projectId": "1693b29b-9075-4384-9e43-671f6901bcf1"
+      }
     }
   }
 }

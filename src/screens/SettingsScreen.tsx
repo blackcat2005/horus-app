@@ -24,6 +24,7 @@ import { authStore } from '../services/authStore';
 import { logout } from '../api/auth';
 import { getDeviceId } from '../utils/device';
 import { logger } from '../utils/logger';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export default function SettingsScreen() {
   const [host, setHost] = useState('');
@@ -63,11 +64,26 @@ export default function SettingsScreen() {
         text: 'Đăng xuất',
         style: 'destructive',
         onPress: async () => {
-          await logout();
+          try { await logout(); } catch(e){ logger.warn('logout api failed, forcing clear', e); await authStore.clear(); }
+          // Fallback nếu AuthGate chưa kịp chuyển (do token cũ 9992)
+          setTimeout(async()=>{ const s=await authStore.load(); if(s) { await AsyncStorage.removeItem('auth_session'); await authStore.clear(); } }, 800);
         },
       },
     ]);
   }, []);
+
+  const handleForceClear = useCallback(async()=>{
+    Alert.alert('Buộc đăng xuất', 'Xóa session local và quay về màn đăng nhập? (Dùng khi "Đăng xuất" không phản hồi do 9992)', [
+      { text: 'Hủy', style:'cancel'},
+      { text:'Xóa & đăng nhập lại', style:'destructive', onPress: async()=>{
+        try{ await AsyncStorage.removeItem('auth_session'); }catch{}
+        await authStore.clear();
+        // Xoá deviceId cũ nếu bị kẹt "not owned by user" do DB reset — lần sau getDeviceId sẽ tạo mới
+        try{ await AsyncStorage.removeItem('app_device_id'); }catch{}
+        Alert.alert('Đã xóa', 'Vui lòng khởi động lại app và đăng nhập lại (0900000002/Remote@123).');
+      }}
+    ]);
+  },[]);
 
   const handleSave = useCallback(async () => {
     const trimmedHost = host.trim();
@@ -227,6 +243,11 @@ export default function SettingsScreen() {
                   style={[styles.button, styles.logoutButton]}
                   onPress={handleLogout}>
                   <Text style={styles.buttonText}>🚪 Đăng xuất</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.button, {backgroundColor: colors.textSecondary, marginTop: spacing.sm}]}
+                  onPress={handleForceClear}>
+                  <Text style={styles.buttonText}>🧹 Buộc đăng xuất (xóa session)</Text>
                 </TouchableOpacity>
               </View>
             )}
