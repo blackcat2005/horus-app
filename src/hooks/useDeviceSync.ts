@@ -7,6 +7,7 @@ import { AppState } from 'react-native';
 import { deviceSyncService } from '../services/deviceSync';
 import { cameraService } from '../services/camera';
 import { streamingService } from '../services/streaming';
+import { localStore } from '../services/localStore';
 import { logger } from '../utils/logger';
 import { authStore } from '../services/authStore';
 import { useRouter } from 'expo-router';
@@ -35,10 +36,24 @@ export function useDeviceSync(deviceId: string, opts?: { enabled?: boolean }) {
     const offStart = deviceSyncService.onCommand('start_record', async cmd => {
       const payload = cmd.payload as { session_id?: string; config?: { max_duration?: number; resolution?: string; fps?: number }; client_command_id?: string };
       logger.info('Handling start_record', payload);
-      // session_id từ server — lưu vào upload metadata
+      // Nếu đang preview (WebRTC giữ camera), phải nhả camera trước để expo-camera quay được
+      const wasPreviewing = !cameraService.isReady_();
+      if (wasPreviewing) {
+        logger.info('start_record while previewing — disconnect preview to free camera');
+        try { const { mediasoupClientService } = await import('../services/mediasoupClient'); mediasoupClientService.disconnect(); } catch {}
+        deviceSyncService.triggerPreviewDisconnect();
+        // đợi CameraView remount + onCameraReady
+        for (let i = 0; i < 20; i++) {
+          if (cameraService.isReady_()) break;
+          await new Promise(r => setTimeout(r, 150));
+        }
+        if (!cameraService.isReady_()) logger.warn('Camera still not ready after preview disconnect, will try startRecording anyway');
+        else await new Promise(r => setTimeout(r, 400));
+      }
       const maxDur = typeof payload.config?.max_duration === 'number' ? payload.config.max_duration : 60;
       const started = await streamingService.startRecording(maxDur);
       if (started) recordingStartAt.current = Date.now();
+      else logger.warn('startRecording failed after preview disconnect', { wasPreviewing, cameraReady: cameraService.isReady_() });
       deviceSyncService.setLastCommandId(cmd.command_id);
     });
 
@@ -47,7 +62,8 @@ export function useDeviceSync(deviceId: string, opts?: { enabled?: boolean }) {
       const uri = await streamingService.stopRecording();
       recordingStartAt.current = null;
       if (uri) {
-        // Tách nền upload chunk theo spec (giữ local + upload)
+        // Lưu local trước (để Files hiện) rồi upload nền
+        try { await localStore.saveCapturedMedia(uri, 'video'); } catch (e) { logger.warn('saveCapturedMedia failed', e); }
         const payload = cmd.payload as { session_id?: string };
         streamingService
           .uploadRecording(uri)

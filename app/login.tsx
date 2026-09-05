@@ -16,6 +16,7 @@ import {
   View,
 } from 'react-native';
 import Constants from 'expo-constants';
+import { useRouter } from 'expo-router';
 
 import { colors, radius, spacing } from '../src/constants/theme';
 import { getDeviceId } from '../src/utils/device';
@@ -25,6 +26,7 @@ import { serverConfigService } from '../src/services/serverConfig';
 import { logger } from '../src/utils/logger';
 
 export default function LoginScreen() {
+  const router = useRouter();
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [host, setHost] = useState('');
@@ -69,7 +71,7 @@ export default function LoginScreen() {
           (Constants as any).deviceName ||
           `${Platform.OS === 'ios' ? 'iPhone' : 'Android'} của tôi`,
       });
-      // Router guard trong app/_layout.tsx sẽ tự chuyển màn
+      router.replace('/(tabs)');
     } catch (err: any) {
       logger.warn('Login failed', err);
       const message =

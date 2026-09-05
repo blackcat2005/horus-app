@@ -104,6 +104,18 @@ export default function RemoteScreen() {
   const { session } = useAuthSession();
   const isRemote = session?.accountRole === 'remote';
   useDeviceSync(deviceId, { enabled: !!deviceId && !!session && isRemote });
+  // Cho useDeviceSync nhả preview khi nhận start_record (WebRTC đang giữ camera)
+  useEffect(() => {
+    deviceSyncService.setPreviewDisconnect(() => {
+      if (isPreviewing) {
+        dbg('start_record → ngắt preview để quay');
+        mediasoupClientService.disconnect();
+        setLocalWrtcStream(null);
+        setIsPreviewing(false);
+        setIsFullscreenPreview(false);
+      }
+    });
+  }, [isPreviewing, dbg]);
 
   // Log insets ngay khi mount để debug Samsung đè bar
   useEffect(() => {

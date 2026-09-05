@@ -31,6 +31,7 @@ class DeviceSyncService {
   private telemetryProvider: (() => DeviceSyncTelemetry) | null = null;
   private onSessionRevoked: (() => void) | null = null;
   private onRoomStatus: ((status: { in_room: number; room_id: string | null; session_id: string | null }) => void) | null = null;
+  private previewDisconnect: (() => void) | null = null;
 
   public initialize(deviceId: string): void {
     this.deviceId = deviceId;
@@ -53,6 +54,14 @@ class DeviceSyncService {
 
   public onRoomStatusChange(handler: (s: { in_room: number; room_id: string | null; session_id: string | null }) => void): void {
     this.onRoomStatus = handler;
+  }
+
+  public setPreviewDisconnect(fn: () => void): void {
+    this.previewDisconnect = fn;
+  }
+
+  public triggerPreviewDisconnect(): void {
+    try { this.previewDisconnect?.(); } catch {}
   }
 
   public start(): void {
