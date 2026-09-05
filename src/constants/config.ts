@@ -3,9 +3,8 @@
  */
 
 // WebSocket Configuration
-// ENABLE_SOCKET cho live WS base64 tới server demo 3333 (chạy được trên Expo Go, không cần webrtc)
-export const ENABLE_SOCKET = true;
-// LIVE_WS_PORT riêng cho server demo cũ (3333) — khác API port 3000 của multicam-server
+// Chỉ dùng mediasoup WebRTC (không dùng WS base64 demo cũ) — Expo Go sẽ không Live WS, cần dev-client cho webrtc
+export const ENABLE_SOCKET = false;
 export const LIVE_WS_PORT = '3333';
 export const WS_RECONNECT_INTERVAL = 3000; // ms
 export const WS_HEARTBEAT_INTERVAL = 30000; // ms

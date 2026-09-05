@@ -57,7 +57,7 @@
       "bundler": "metro"
     },
     "extra": {
-      "wsHost": "192.168.1.101",
+      "wsHost": "192.168.1.6",
       "wsPort": "3000",
       "liveWsPort": "3333",
       "router": {},

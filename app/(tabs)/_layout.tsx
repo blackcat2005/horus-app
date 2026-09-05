@@ -1,22 +1,46 @@
-import { Tabs } from 'expo-router';
+import { Tabs, useSegments, useRouter } from 'expo-router';
 import { StyleSheet, Text } from 'react-native';
+import { useEffect } from 'react';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useAuthSession } from '../../src/hooks/useAuthSession';
+import { logger } from '../../src/utils/logger';
 import { colors, radius, spacing } from '../../src/constants/theme';
+
+function AuthGate({ children }: { children: React.ReactNode }) {
+  const { ready, session } = useAuthSession();
+  const segments = useSegments();
+  const router = useRouter();
+  useEffect(() => {
+    if (!ready) return;
+    const inLogin = segments[0] === 'login';
+    if (!session && !inLogin) {
+      logger.info('AuthGate: redirect to login');
+      router.replace('/login');
+    } else if (session && inLogin) {
+      logger.info('AuthGate: redirect to tabs');
+      router.replace('/(tabs)');
+    }
+  }, [ready, session, segments, router]);
+  return <>{children}</>;
+}
 
 function TabIcon({ label, focused }: { label: string; focused: boolean }) {
   return <Text style={[styles.icon, focused && styles.iconActive]}>{label}</Text>;
 }
 
 export default function TabLayout() {
+  const insets = useSafeAreaInsets();
   return (
-    <Tabs
-      screenOptions={{
-        headerShown: false,
-        tabBarActiveTintColor: colors.primary,
-        tabBarInactiveTintColor: colors.textMuted,
-        tabBarStyle: styles.tabBar,
-        tabBarLabelStyle: styles.tabLabel,
-        tabBarItemStyle: styles.tabItem,
-      }}>
+    <AuthGate>
+      <Tabs
+        screenOptions={{
+          headerShown: false,
+          tabBarActiveTintColor: colors.primary,
+          tabBarInactiveTintColor: colors.textMuted,
+          tabBarStyle: [styles.tabBar, { height: 64 + insets.bottom, paddingBottom: insets.bottom + 4 }],
+          tabBarLabelStyle: styles.tabLabel,
+          tabBarItemStyle: styles.tabItem,
+        }}>
       <Tabs.Screen
         name="index"
         options={{
@@ -31,13 +55,7 @@ export default function TabLayout() {
           tabBarIcon: ({ focused }) => <TabIcon label="🗂️" focused={focused} />,
         }}
       />
-      <Tabs.Screen
-        name="controller"
-        options={{
-          title: 'Phòng',
-          tabBarIcon: ({ focused }) => <TabIcon label="🎛️" focused={focused} />,
-        }}
-      />
+      <Tabs.Screen name="controller" options={{ href: null }} />
       <Tabs.Screen
         name="settings"
         options={{
@@ -45,7 +63,8 @@ export default function TabLayout() {
           tabBarIcon: ({ focused }) => <TabIcon label="⚙️" focused={focused} />,
         }}
       />
-    </Tabs>
+      </Tabs>
+    </AuthGate>
   );
 }
 

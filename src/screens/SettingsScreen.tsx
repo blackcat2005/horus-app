@@ -17,6 +17,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { colors, spacing, radius } from '../constants/theme';
 import { serverConfigService } from '../services/serverConfig';
@@ -140,17 +141,16 @@ export default function SettingsScreen() {
   }, [host, port]);
 
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-      <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-        <View style={styles.header}>
-          <Text style={styles.headerTitle}>Cài đặt kết nối</Text>
-          <Text style={styles.headerSub}>
-            Nhập địa chỉ IP và port của máy đang chạy server. Thông tin sẽ được lưu trên thiết bị và
-            dùng cho lần mở app tiếp theo.
-          </Text>
-        </View>
+    <SafeAreaView style={styles.container} edges={['top']}>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+          <View style={styles.header}>
+            <View style={styles.headerIconWrap}><Text style={styles.headerIcon}>⚙️</Text></View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.headerTitle}>Cài đặt</Text>
+              <Text style={styles.headerSub}>Server & tài khoản</Text>
+            </View>
+          </View>
 
         {isLoading ? (
           <View style={styles.loadingBox}>
@@ -159,47 +159,50 @@ export default function SettingsScreen() {
         ) : (
           <>
             <View style={styles.card}>
-              <Text style={styles.label}>Địa chỉ IP server</Text>
-              <TextInput
-                style={styles.input}
-                value={host}
-                onChangeText={setHost}
-                placeholder="VD: 192.168.1.102"
-                placeholderTextColor={colors.textMuted}
-                autoCapitalize="none"
-                autoCorrect={false}
-                keyboardType="url"
-              />
+              <Text style={styles.cardTitle}>🖥️ Server</Text>
+              <View style={styles.row}>
+                <View style={{ flex: 2 }}>
+                  <Text style={styles.label}>IP</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={host}
+                    onChangeText={setHost}
+                    placeholder="192.168.1.6"
+                    placeholderTextColor={colors.textMuted}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    keyboardType="url"
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.label}>Port</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={port}
+                    onChangeText={setPort}
+                    placeholder="3000"
+                    placeholderTextColor={colors.textMuted}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    keyboardType="number-pad"
+                  />
+                </View>
+              </View>
 
-              <Text style={styles.label}>Port</Text>
-              <TextInput
-                style={styles.input}
-                value={port}
-                onChangeText={setPort}
-                placeholder="VD: 3000"
-                placeholderTextColor={colors.textMuted}
-                autoCapitalize="none"
-                autoCorrect={false}
-                keyboardType="number-pad"
-              />
-
-              <TouchableOpacity
-                style={[styles.button, isSaving && styles.buttonDisabled]}
-                onPress={handleSave}
-                disabled={isSaving}>
-                <Text style={styles.buttonText}>
-                  {isSaving ? 'Đang lưu...' : '💾 Lưu & kết nối lại'}
-                </Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[styles.button, styles.buttonGhost, isTesting && styles.buttonDisabled]}
-                onPress={handleTest}
-                disabled={isTesting}>
-                <Text style={styles.buttonGhostText}>
-                  {isTesting ? 'Đang kiểm tra...' : '📡 Kiểm tra kết nối'}
-                </Text>
-              </TouchableOpacity>
+              <View style={styles.row}>
+                <TouchableOpacity
+                  style={[styles.button, styles.buttonFlex, isSaving && styles.buttonDisabled]}
+                  onPress={handleSave}
+                  disabled={isSaving}>
+                  <Text style={styles.buttonText}>{isSaving ? '...' : '💾 Lưu'}</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.button, styles.buttonGhost, styles.buttonFlex, isTesting && styles.buttonDisabled]}
+                  onPress={handleTest}
+                  disabled={isTesting}>
+                  <Text style={styles.buttonGhostText}>{isTesting ? '...' : '📡 Test'}</Text>
+                </TouchableOpacity>
+              </View>
 
               {testResult && (
                 <View
@@ -222,113 +225,52 @@ export default function SettingsScreen() {
 
             {account && (
               <View style={styles.infoCard}>
-                <Text style={styles.infoTitle}>Tài khoản</Text>
-                <View style={styles.infoRow}>
-                  <Text style={styles.infoLabel}>Tên</Text>
-                  <Text style={styles.infoValue} numberOfLines={1}>
-                    {account.name}
-                  </Text>
+                <View style={styles.infoCardHeader}>
+                  <Text style={styles.infoTitle}>👤 {account.name}</Text>
+                  <View style={[styles.badge, account.role === 'Controller' ? styles.badgeController : styles.badgeRemote]}>
+                    <Text style={styles.badgeText}>{account.role}</Text>
+                  </View>
                 </View>
-                <View style={[styles.infoRow, styles.infoRowGap]}>
-                  <Text style={styles.infoLabel}>Vai trò</Text>
-                  <Text style={styles.infoValue}>{account.role}</Text>
+                <Text style={styles.infoValueSmall} numberOfLines={1}>{account.phone}</Text>
+                <View style={styles.row}>
+                  <TouchableOpacity style={[styles.button, styles.logoutButton, styles.buttonFlex]} onPress={handleLogout}>
+                    <Text style={styles.buttonText}>🚪 Thoát</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={[styles.button, styles.buttonGhost, styles.buttonFlex]} onPress={handleForceClear}>
+                    <Text style={styles.buttonGhostText}>🧹 Xóa</Text>
+                  </TouchableOpacity>
                 </View>
-                <View style={[styles.infoRow, styles.infoRowGap]}>
-                  <Text style={styles.infoLabel}>Liên hệ</Text>
-                  <Text style={styles.infoValue} numberOfLines={1}>
-                    {account.phone}
-                  </Text>
-                </View>
-                <TouchableOpacity
-                  style={[styles.button, styles.logoutButton]}
-                  onPress={handleLogout}>
-                  <Text style={styles.buttonText}>🚪 Đăng xuất</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.button, {backgroundColor: colors.textSecondary, marginTop: spacing.sm}]}
-                  onPress={handleForceClear}>
-                  <Text style={styles.buttonText}>🧹 Buộc đăng xuất (xóa session)</Text>
-                </TouchableOpacity>
               </View>
             )}
 
             <View style={styles.infoCard}>
-              <Text style={styles.infoTitle}>Thông tin thiết bị</Text>
-              <View style={styles.infoRow}>
-                <Text style={styles.infoLabel}>Device ID</Text>
-                <Text style={styles.infoValue} numberOfLines={1}>
-                  {deviceId}
-                </Text>
-              </View>
-              <Text style={styles.infoNote}>
-                Device ID giúp bạn nhận diện thiết bị này trên dashboard của server.
-              </Text>
+              <Text style={styles.infoTitle}>📱 Thiết bị</Text>
+              <Text style={styles.infoValueMono} numberOfLines={1}>{deviceId}</Text>
+              <Text style={styles.infoNote}>Dùng để nhận diện trên dashboard</Text>
             </View>
           </>
         )}
-      </ScrollView>
-    </KeyboardAvoidingView>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.background,
-  },
-  content: {
-    padding: spacing.lg,
-    paddingBottom: spacing.xl,
-  },
-  header: {
-    marginBottom: spacing.lg,
-  },
-  headerTitle: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: colors.text,
-  },
-  headerSub: {
-    fontSize: 13,
-    color: colors.textSecondary,
-    marginTop: spacing.sm,
-    lineHeight: 19,
-  },
-  card: {
-    backgroundColor: colors.surface,
-    borderRadius: radius.lg,
-    padding: spacing.lg,
-    marginBottom: spacing.lg,
-    shadowColor: '#000',
-    shadowOpacity: 0.05,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 2,
-  },
-  label: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: colors.textSecondary,
-    marginBottom: spacing.xs,
-    marginTop: spacing.md,
-  },
-  input: {
-    backgroundColor: colors.background,
-    borderRadius: radius.md,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.md,
-    fontSize: 16,
-    color: colors.text,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  button: {
-    backgroundColor: colors.primary,
-    borderRadius: radius.md,
-    paddingVertical: spacing.md,
-    alignItems: 'center',
-    marginTop: spacing.lg,
-  },
+  container: { flex: 1, backgroundColor: colors.background },
+  content: { padding: spacing.md, paddingBottom: 24, gap: spacing.md },
+  header: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginBottom: spacing.sm },
+  headerIconWrap: { width: 40, height: 40, borderRadius: 12, backgroundColor: colors.primaryLight, justifyContent: 'center', alignItems: 'center' },
+  headerIcon: { fontSize: 20 },
+  headerTitle: { fontSize: 18, fontWeight: '800', color: colors.text },
+  headerSub: { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
+  card: { backgroundColor: colors.surface, borderRadius: radius.lg, padding: spacing.md, shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 1 },
+  cardTitle: { fontSize: 13, fontWeight: '800', color: colors.text, marginBottom: spacing.sm },
+  row: { flexDirection: 'row', gap: spacing.sm },
+  label: { fontSize: 11, fontWeight: '700', color: colors.textSecondary, marginBottom: 4, marginTop: spacing.sm },
+  input: { backgroundColor: colors.background, borderRadius: radius.md, paddingHorizontal: spacing.md, paddingVertical: 10, fontSize: 14, color: colors.text, borderWidth: 1, borderColor: colors.border },
+  button: { backgroundColor: colors.primary, borderRadius: radius.md, paddingVertical: 10, alignItems: 'center', marginTop: spacing.md },
+  buttonFlex: { flex: 1 },
   buttonText: {
     color: colors.white,
     fontSize: 15,
@@ -367,48 +309,20 @@ const styles = StyleSheet.create({
   testFailText: {
     color: colors.dangerDark,
   },
-  infoCard: {
-    backgroundColor: colors.surface,
-    borderRadius: radius.lg,
-    padding: spacing.lg,
-    shadowColor: '#000',
-    shadowOpacity: 0.05,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 2,
-  },
-  infoTitle: {
-    fontSize: 15,
-    fontWeight: 'bold',
-    color: colors.text,
-    marginBottom: spacing.md,
-  },
-  infoRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  infoLabel: {
-    fontSize: 13,
-    color: colors.textSecondary,
-  },
-  infoValue: {
-    fontSize: 13,
-    color: colors.text,
-    fontWeight: '600',
-    flexShrink: 1,
-    marginLeft: spacing.md,
-    textAlign: 'right',
-  },
-  infoNote: {
-    fontSize: 12,
-    color: colors.textMuted,
-    marginTop: spacing.md,
-    lineHeight: 18,
-  },
-  infoRowGap: {
-    marginTop: spacing.md,
-  },
+  infoCard: { backgroundColor: colors.surface, borderRadius: radius.lg, padding: spacing.md, shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 1 },
+  infoCardHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 },
+  infoTitle: { fontSize: 13, fontWeight: '800', color: colors.text },
+  badge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: radius.round },
+  badgeController: { backgroundColor: colors.primaryLight },
+  badgeRemote: { backgroundColor: colors.successLight },
+  badgeText: { fontSize: 11, fontWeight: '800', color: colors.primaryDark },
+  infoValueSmall: { fontSize: 12, color: colors.textSecondary, marginBottom: spacing.sm },
+  infoValueMono: { fontSize: 11, color: colors.text, fontFamily: 'monospace', marginBottom: 4 },
+  infoRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  infoLabel: { fontSize: 13, color: colors.textSecondary },
+  infoValue: { fontSize: 13, color: colors.text, fontWeight: '600', flexShrink: 1, marginLeft: spacing.md, textAlign: 'right' },
+  infoNote: { fontSize: 11, color: colors.textMuted, marginTop: 4 },
+  infoRowGap: { marginTop: spacing.md },
   logoutButton: {
     backgroundColor: colors.danger,
   },

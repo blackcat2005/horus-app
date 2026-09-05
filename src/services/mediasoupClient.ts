@@ -43,15 +43,18 @@ class MediasoupClientService {
   private recvTransport: Transport | null = null;
   private localStream: any | null = null;
   private consumers = new Map<string, { consumer: any; stream: any }>();
+  private videoProducer: any | null = null;
+  private audioProducer: any | null = null;
+  private facingMode: 'user' | 'environment' = 'environment';
 
   public async startProducing(roomId: string): Promise<void> {
     const wrtc = await loadWebRTC();
     const ms = await loadMediasoup();
 
-    // 1) Nối signaling nếu chưa
+    // 1) Nối signaling nếu chưa — dùng medium để 720p
     const state = mediasoupService.getState();
     if (!state.connected) {
-      await mediasoupService.connect(roomId, { quality: 'low', protocol: 'webrtc' });
+      await mediasoupService.connect(roomId, { quality: 'medium', protocol: 'webrtc' });
     }
     const rtpCaps = mediasoupService.getState().rtpCapabilities as unknown as any;
     if (!rtpCaps) throw new Error('No rtpCapabilities from welcome');
@@ -61,11 +64,28 @@ class MediasoupClientService {
     await this.device.load({ routerRtpCapabilities: rtpCaps });
     logger.info('mediasoup Device loaded', { canProduceVideo: this.device.canProduce('video') });
 
-    // 3) Lấy local camera
-    this.localStream = await (wrtc.mediaDevices as unknown as { getUserMedia: (c: unknown) => Promise<any> }).getUserMedia({
-      audio: true,
-      video: { facingMode: 'environment', width: 640, height: 480, frameRate: 15 },
-    });
+    // 3) Lấy local camera — thử facingMode theo state, audio bật echoCancellation để đỡ vọng
+    const audioConstraints: any = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+    try {
+      this.localStream = await (wrtc.mediaDevices as unknown as { getUserMedia: (c: unknown) => Promise<any> }).getUserMedia({
+        audio: audioConstraints,
+        video: { facingMode: this.facingMode, width: 1280, height: 720, frameRate: 30 },
+      });
+    } catch (e) {
+      logger.warn(`getUserMedia ${this.facingMode} 720p failed, retry 640p`, e);
+      try {
+        this.localStream = await (wrtc.mediaDevices as unknown as { getUserMedia: (c: unknown) => Promise<any> }).getUserMedia({
+          audio: audioConstraints,
+          video: { facingMode: this.facingMode, width: 640, height: 480, frameRate: 30 },
+        });
+      } catch (e2) {
+        logger.warn(`getUserMedia ${this.facingMode} failed, retry fallback`, e2);
+        this.localStream = await (wrtc.mediaDevices as unknown as { getUserMedia: (c: unknown) => Promise<any> }).getUserMedia({
+          audio: audioConstraints,
+          video: true,
+        });
+      }
+    }
 
     // 4) Tạo send transport qua server
     const trRes = (await mediasoupService.createTransportAsync('send')) as unknown as {
@@ -80,34 +100,70 @@ class MediasoupClientService {
 
     this.sendTransport.on('connect', async ({ dtlsParameters }: any, callback: any, errback: any) => {
       try {
+        logger.info('sendTransport connect', { dtlsParameters });
         await mediasoupService.connectTransportAsync(trRes.transport_id, dtlsParameters);
+        logger.info('sendTransport connected');
         callback();
       } catch (e) {
+        logger.error('sendTransport connect failed', e);
         errback(e as Error);
       }
     });
+    this.sendTransport.on('connectionstatechange', (state: string) => logger.info('sendTransport connectionstatechange '+state));
     this.sendTransport.on('produce', async ({ kind, rtpParameters }: any, callback: any, errback: any) => {
       try {
+        logger.info('sendTransport produce kind='+kind);
         const res = (await mediasoupService.produceAsync(trRes.transport_id, kind, rtpParameters)) as unknown as { producer_id: string };
+        logger.info('produced '+kind+' id='+res.producer_id);
         callback({ id: res.producer_id });
       } catch (e) {
+        logger.error('produce failed kind='+kind, e);
         errback(e as Error);
       }
     });
 
-    // 5) Produce
+    // 5) Produce (log track details before)
     const videoTrack = this.localStream.getVideoTracks()[0];
     const audioTrack = this.localStream.getAudioTracks()[0];
-    if (videoTrack) await this.sendTransport.produce({ track: videoTrack });
-    if (audioTrack) await this.sendTransport.produce({ track: audioTrack });
-    logger.info('Producing done');
+    logger.info('localTracks', { video: videoTrack ? { enabled: videoTrack.enabled, muted: (videoTrack as any).muted, readyState: (videoTrack as any).readyState, settings: (videoTrack as any).getSettings?.() } : null, audio: audioTrack ? { enabled: audioTrack.enabled, readyState: (audioTrack as any).readyState } : null });
+    if (videoTrack) this.videoProducer = await this.sendTransport.produce({ track: videoTrack });
+    if (audioTrack) this.audioProducer = await this.sendTransport.produce({ track: audioTrack });
+    logger.info('Producing done', { facingMode: this.facingMode });
+    // poll connectionstate after 2s
+    setTimeout(()=> logger.info('sendTransport state after 2s ' + (this.sendTransport as any)?.connectionState), 2000);
   }
+
+  public async switchCamera(): Promise<'user' | 'environment'> {
+    this.facingMode = this.facingMode === 'user' ? 'environment' : 'user';
+    if (!this.localStream || !this.videoProducer) {
+      logger.info('switchCamera no active producer, just toggle to '+this.facingMode);
+      return this.facingMode;
+    }
+    const wrtc = await loadWebRTC();
+    const newStream = await (wrtc.mediaDevices as unknown as { getUserMedia: (c: unknown) => Promise<any> }).getUserMedia({
+      video: { facingMode: this.facingMode, width: 640, height: 480, frameRate: 15 },
+      audio: false,
+    });
+    const newTrack = newStream.getVideoTracks()[0];
+    if (!newTrack) throw new Error('No video track for '+this.facingMode);
+    await this.videoProducer.replaceTrack({ track: newTrack });
+    const oldTrack = this.localStream.getVideoTracks()[0];
+    try { oldTrack?.stop(); } catch {}
+    // replace in localStream
+    this.localStream.removeTrack(oldTrack);
+    this.localStream.addTrack(newTrack);
+    logger.info('switchCamera done '+this.facingMode);
+    return this.facingMode;
+  }
+  public getFacingMode(): string { return this.facingMode; }
 
   public stopProducing(): void {
     try { this.localStream?.getTracks().forEach((t: any) => t.stop()); } catch {}
     try { this.sendTransport?.close(); } catch {}
     this.sendTransport = null;
     this.localStream = null;
+    this.videoProducer = null;
+    this.audioProducer = null;
   }
 
   public async startConsuming(roomId: string, onStream: (memberId: string, stream: any) => void): Promise<() => void> {

@@ -14,9 +14,11 @@ import {
   View,
   ActivityIndicator,
   TouchableOpacity,
+  ScrollView,
 } from 'react-native';
 import { CameraView, useCameraPermissions, useMicrophonePermissions } from 'expo-camera';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { StatusBar as RNStatusBar } from 'react-native';
 import { useRouter } from 'expo-router';
 
 import { logger } from '../utils/logger';
@@ -41,7 +43,7 @@ export default function RemoteScreen() {
   const isWeb = Platform.OS === 'web';
   const [permission, requestPermission] = useCameraPermissions();
   const [micPermission, requestMicPermission] = useMicrophonePermissions();
-  const [cameraMode, setCameraMode] = useState<CameraMode>('picture');
+  const [cameraMode, setCameraMode] = useState<CameraMode>('video');
   const [isCameraReady, setIsCameraReady] = useState(false);
   const [photoUri, setPhotoUri] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -55,6 +57,23 @@ export default function RemoteScreen() {
   const [roomIdForPreview, setRoomIdForPreview] = useState<string | null>(null);
   const [inviteInput, setInviteInput] = useState('');
   const [joinLog, setJoinLog] = useState<string[]>([]);
+  const [dbgLog, setDbgLog] = useState<string[]>([]);
+  const [showDbg, setShowDbg] = useState(true);
+  const [localWrtcStream, setLocalWrtcStream] = useState<any>(null);
+  const [rtcKey, setRtcKey] = useState(0);
+  const [RTCViewComp, setRTCViewComp] = useState<any>(null);
+  const [isFullscreenPreview, setIsFullscreenPreview] = useState(false);
+  const [showTopBar, setShowTopBar] = useState(true);
+  useEffect(() => { if (isPreviewing && !RTCViewComp) { import('react-native-webrtc').then(m => setRTCViewComp(() => (m as any).RTCView)).catch(() => {}); } }, [isPreviewing, RTCViewComp]);
+  const dbgScrollRef = useRef<ScrollView>(null);
+  const dbg = useCallback((m: string) => {
+    const line = `${new Date().toLocaleTimeString()} ${m}`;
+    setDbgLog(prev => [...prev.slice(-40), line]);
+    logger.info(line);
+  }, []);
+  useEffect(() => {
+    dbgScrollRef.current?.scrollToEnd({ animated: true });
+  }, [dbgLog]);
 
   const cameraRef = useRef<CameraView | null>(null);
 
@@ -86,16 +105,27 @@ export default function RemoteScreen() {
   const isRemote = session?.accountRole === 'remote';
   useDeviceSync(deviceId, { enabled: !!deviceId && !!session && isRemote });
 
-  // Theo dõi room_status để hiện nút preview mediasoup
+  // Log insets ngay khi mount để debug Samsung đè bar
   useEffect(() => {
-    deviceSyncService.onRoomStatusChange(s => {
+    dbg(`SAFE insets top=${insets.top} bottom=${insets.bottom} statusBarH=${RNStatusBar.currentHeight || 0}`);
+  }, [insets.top, insets.bottom, dbg]);
+  // Theo dõi room_status — chỉ log khi đổi in_room/room_id để đỡ spam 3-5s polling
+  const lastRoomRef = useRef<string>('0');
+  useEffect(() => {
+    return deviceSyncService.onRoomStatusChange(s => {
+      const key = `${s.in_room ? 1 : 0}_${s.room_id || ''}`;
+      if (key !== lastRoomRef.current) {
+        lastRoomRef.current = key;
+        dbg(`room_status in_room=${s.in_room} room_id=${s.room_id?.slice(0, 8) || 'null'}`);
+      }
       setRoomIdForPreview(s.in_room ? s.room_id : null);
       if (!s.in_room && isPreviewing) {
+        dbg('leave room → disconnect mediasoup');
         mediasoupClientService.disconnect();
         setIsPreviewing(false);
       }
     });
-  }, [isPreviewing]);
+  }, [isPreviewing, dbg]);
 
   // Yêu cầu quyền Camera khi component mount
   useEffect(() => {
@@ -364,41 +394,48 @@ export default function RemoteScreen() {
 
   return (
     <View style={styles.container}>
-      {/* Camera View */}
-      <CameraView
-        ref={cameraRef}
-        style={styles.camera}
-        facing="back"
-        mode={cameraMode}
-        onCameraReady={() => {
-          logger.info('Camera is ready (onCameraReady fired)', {
-            cameraMode,
-            micStatus: micPermission?.status ?? 'unknown',
-            micGranted: micPermission?.granted ?? false,
-          });
-          setIsCameraReady(true);
-          cameraService.setCameraRef(cameraRef.current);
-          cameraService.setReady(true);
-        }}
-        onMountError={(error: any) => {
-          logger.error('Camera mount error (onMountError)', error?.nativeEvent ?? error);
-        }}
-      />
+      {/* Khi preview thì unmount CameraView để WebRTC chiếm camera duy nhất, tránh đứng hình do 2 consumer */}
+      {!isPreviewing ? (
+        <CameraView
+          ref={cameraRef}
+          style={styles.camera}
+          facing="back"
+          mode={cameraMode}
+          onCameraReady={() => {
+            logger.info('Camera is ready (onCameraReady fired)', {
+              cameraMode,
+              micStatus: micPermission?.status ?? 'unknown',
+              micGranted: micPermission?.granted ?? false,
+            });
+            setIsCameraReady(true);
+            cameraService.setCameraRef(cameraRef.current);
+            cameraService.setReady(true);
+          }}
+          onMountError={(error: any) => {
+            logger.error('Camera mount error (onMountError)', error?.nativeEvent ?? error);
+          }}
+        />
+      ) : RTCViewComp && localWrtcStream ? (
+        // @ts-ignore
+        <RTCViewComp key={rtcKey} streamURL={localWrtcStream.toURL()} style={[styles.camera, isFullscreenPreview && styles.cameraFullscreen]} objectFit={isFullscreenPreview ? 'contain' : 'cover'} mirror={true} />
+      ) : (
+        <View style={[styles.camera, { justifyContent: 'center', alignItems: 'center', backgroundColor: '#000' }]}>
+          <Text style={{ color: '#fff' }}>Đang mở camera WebRTC...</Text>
+        </View>
+      )}
 
-      {/* Top Bar */}
-      <View style={[styles.topBar, { paddingTop: insets.top + spacing.md }]}>
+      {showTopBar ? (
+        <View style={[styles.topBar, { top: insets.top, paddingTop: spacing.md }]}>
         <View style={styles.topBarRow}>
           <View style={styles.topBarInfo}>
-            <Text style={styles.topBarTitle}>📷 Remote Camera</Text>
-            <Text style={styles.topBarDevice} numberOfLines={1}>
-              {deviceId ? `ID: ${deviceId}` : 'Đang lấy device ID...'}
-            </Text>
+            <Text style={styles.topBarTitle}>📷 Remote</Text>
+            <Text style={styles.topBarDevice} numberOfLines={1}>{deviceId ? deviceId.slice(0, 12) : '...'}</Text>
           </View>
           <TouchableOpacity
-            style={styles.settingsButton}
-            onPress={() => router.push('/settings')}
+            style={styles.hideButton}
+            onPress={() => setShowTopBar(v => !v)}
             hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-            <Text style={styles.settingsButtonText}>⚙️</Text>
+            <Text style={styles.hideButtonText}>{showTopBar ? '🙈 Ẩn' : '👁️ Hiện'}</Text>
           </TouchableOpacity>
         </View>
 
@@ -423,14 +460,23 @@ export default function RemoteScreen() {
           </View>
         </View>
 
-        {isStreaming && streamingStats && (
-          <View style={[styles.alertBox, styles.alertStreaming]}>
-            <Text style={styles.alertTitle}>
-              📹 Đang stream · {streamingStats.currentFPS?.toFixed(1) || 0} FPS
-            </Text>
-            <Text style={styles.alertSub}>Buffer: {streamingStats.bufferedFrames} frames</Text>
-          </View>
-        )}
+          {isPreviewing && (
+            <View style={[styles.alertBox, { backgroundColor: 'rgba(16,185,129,0.28)', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }]}>
+              <Text style={styles.alertTitle}>📡 Đang phát {mediasoupClientService.getFacingMode()==='user'?'cam trước':'cam sau'}</Text>
+              <View style={{flexDirection:'row',gap:6}}>
+                <TouchableOpacity style={{ backgroundColor: '#0f172a', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8 }} onPress={()=> setIsFullscreenPreview(v=>!v)}><Text style={{color:'#fff',fontWeight:'700',fontSize:12}}>{isFullscreenPreview?'🗗 Thu nhỏ':'⛶ Phóng to'}</Text></TouchableOpacity>
+                <TouchableOpacity style={{ backgroundColor: '#0f172a', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8 }} onPress={async()=>{ try{ const m=await mediasoupClientService.switchCamera(); const s=mediasoupClientService.getLocalStream(); setLocalWrtcStream(null); setTimeout(()=>{ setLocalWrtcStream(s); setRtcKey(k=>k+1); }, 50); dbg('Đổi cam → '+m); }catch(e:any){ dbg('Đổi cam lỗi '+String(e.message||e)); }}}><Text style={{color:'#fff',fontWeight:'700',fontSize:12}}>🔄 Đổi cam</Text></TouchableOpacity>
+              </View>
+            </View>
+          )}
+          {isStreaming && streamingStats && (
+            <View style={[styles.alertBox, styles.alertStreaming]}>
+              <Text style={styles.alertTitle}>
+                📹 Đang stream · {streamingStats.currentFPS?.toFixed(1) || 0} FPS
+              </Text>
+              <Text style={styles.alertSub}>Buffer: {streamingStats.bufferedFrames} frames</Text>
+            </View>
+          )}
 
         {isRecording && (
           <View style={[styles.alertBox, styles.alertRecording]}>
@@ -445,89 +491,113 @@ export default function RemoteScreen() {
           </View>
         )}
         {roomIdForPreview ? (
-          <View style={[styles.alertBox, { backgroundColor: isPreviewing ? 'rgba(16,185,129,0.28)' : 'rgba(148,163,184,0.25)' }]}>
-            <Text style={styles.alertTitle}>{isPreviewing ? '📡 Đang phát mediasoup' : '📡 Đã join phòng'} · {roomIdForPreview.slice(0, 6)}</Text>
-            <TouchableOpacity style={{ marginTop: 8, backgroundColor: 'rgba(239,68,68,0.9)', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8, alignSelf: 'flex-start' }} onPress={async () => { try{ await leaveRoom(roomIdForPreview); setRoomIdForPreview(null); Alert.alert('Đã rời phòng'); } catch(e:any){ Alert.alert('Lỗi rời phòng', String(e.message||e)); } }}>
+          <View style={[styles.alertBox, { backgroundColor: isPreviewing ? 'rgba(16,185,129,0.28)' : 'rgba(148,163,184,0.25)', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }]}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.alertTitle}>{isPreviewing ? '📡 Đang phát' : '📡 Đã join'} · {roomIdForPreview.slice(0, 6)}</Text>
+              <Text style={styles.alertSub}>{isPreviewing ? 'Ngắt sẽ tự lưu' : 'Sẵn sàng phát'}</Text>
+            </View>
+            <TouchableOpacity style={{ backgroundColor: 'rgba(239,68,68,0.9)', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8, marginLeft: 8 }} onPress={async () => {
+              try { if (isPreviewing) { mediasoupClientService.disconnect(); setLocalWrtcStream(null); setIsPreviewing(false); setIsFullscreenPreview(false); } await leaveRoom(roomIdForPreview); setRoomIdForPreview(null); dbg('Đã rời phòng'); } catch(e:any){ Alert.alert('Lỗi rời phòng', String(e.message||e)); }
+            }}>
               <Text style={{ color: '#fff', fontWeight: '700', fontSize: 12 }}>Rời phòng</Text>
             </TouchableOpacity>
           </View>
         ) : (
           <View style={[styles.alertBox, { backgroundColor: 'rgba(37,99,235,0.18)' }]}>
-            <Text style={styles.alertTitle}>🔑 Nhập mã mời để join phòng</Text>
-            <Text style={styles.alertSub}>Lấy mã từ dashboard http://localhost:3000 → Phòng → copy Mã mời (TTL 10 phút)</Text>
+            <Text style={styles.alertTitle}>🔑 Nhập mã mời</Text>
             <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
               <TextInput value={inviteInput} onChangeText={t => setInviteInput(t.toUpperCase())} placeholder="ABCD12" placeholderTextColor="rgba(255,255,255,0.6)" autoCapitalize="characters" maxLength={12} style={{ flex: 1, backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 8, color: '#fff', fontFamily: 'monospace', borderWidth: 1, borderColor: 'rgba(255,255,255,0.3)' }} />
-              <TouchableOpacity style={{ backgroundColor: deviceId ? '#10b981' : '#64748b', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8, justifyContent: 'center' }} disabled={!deviceId} onPress={async () => {
-                const code = inviteInput.trim(); if(!code) return Alert.alert('Thiếu mã mời'); if(!deviceId) return Alert.alert('Chưa có deviceId'); try{ logger.info('Remote joinRoom attempt', { code, deviceId }); const r = await joinRoom({ invite_code: code, device_id: deviceId, camera_name: 'Remote-'+deviceId.slice(0,4), grant_control: true }); setRoomIdForPreview(r.room_id); setJoinLog(p=>[...p.slice(-5), `${new Date().toLocaleTimeString()} OK ${code} -> ${r.room_id.slice(0,8)}`]); Alert.alert('Đã join', r.room_id); } catch(e:any){ const codeErr = e instanceof ApiError ? e.code : 0; const msg = e?.message || String(e); const detail = `[${codeErr}] ${msg} invite=${code} dev=${deviceId.slice(0,8)}`; logger.error('Remote joinRoom failed', { detail }); setJoinLog(p=>[...p.slice(-5), `${new Date().toLocaleTimeString()} FAIL ${detail}`]); if(codeErr===9992) Alert.alert('Mã mời hết hạn', `${msg}\n\nMã ${code} đã hết hạn hoặc không tồn tại (TTL 10 phút). Yêu cầu Controller mở app tab "Phòng" hoặc web dashboard bấm "Mã mới" để lấy mã mới.`); else Alert.alert('Join lỗi', detail); }
+              <TouchableOpacity style={{ backgroundColor: deviceId ? '#10b981' : '#64748b', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8 }} disabled={!deviceId} onPress={async () => {
+                const code = inviteInput.trim(); if(!code) return Alert.alert('Thiếu mã mời'); try{ const r = await joinRoom({ invite_code: code, device_id: deviceId, camera_name: 'Remote-'+deviceId.slice(0,4), grant_control: true }); setRoomIdForPreview(r.room_id); Alert.alert('Đã join', r.room_id); } catch(e:any){ Alert.alert('Join lỗi', String(e.message||e)); }
               }}>
                 <Text style={{ color: '#fff', fontWeight: '700' }}>Join</Text>
               </TouchableOpacity>
             </View>
-            {joinLog.map((l,i)=><Text key={i} style={[styles.alertSub,{fontFamily:'monospace',marginTop:4}]}>{l}</Text>)}
           </View>
         )}
       </View>
-
-      {/* Preview ảnh vừa chụp - thumbnail nhỏ ở góc, bấm vào để đóng */}
-      {photoUri && (
-        <TouchableOpacity style={styles.photoPreviewContainer} onPress={() => setPhotoUri(null)}>
-          <Image source={{ uri: photoUri }} style={styles.photoThumb} />
-          <Text style={styles.photoPreviewClose}>✕</Text>
+      ) : (
+        <TouchableOpacity style={[styles.showTopBarFab, { top: insets.top + 8 }]} onPress={() => setShowTopBar(true)}>
+          <Text style={styles.showTopBarText}>👁️ Hiện</Text>
         </TouchableOpacity>
       )}
 
-      {/* Footer Controls — Expo Go live WS (không cần webrtc) + mediasoup preview (cần dev-client) */}
-      <View style={[styles.footer, { paddingBottom: insets.bottom + spacing.xl }]}>
-        {ENABLE_SOCKET && (
-          <TouchableOpacity
-            style={[styles.footerButton, isStreaming ? { backgroundColor: colors.danger } : { backgroundColor: wsConnected ? '#0ea5e9' : '#64748b' }]}
-            onPress={isStreaming ? handleStopStreaming : handleStartStreaming}
-            disabled={!isCameraReady || !wsConnected}>
-            <Text style={styles.footerButtonIcon}>{isStreaming ? '⏹' : '📡'}</Text>
-            <Text style={styles.footerButtonText}>{isStreaming ? 'Ngừng Live' : wsConnected ? 'Live WS → 3333' : 'Chưa nối WS'}</Text>
-          </TouchableOpacity>
-        )}
+      {/* Debug overlay — dời xuống đáy để không đè ô Nhập mã mời */}
+      {showDbg && (
+        <View style={styles.debugBox}>
+          <View style={styles.debugHeader}>
+            <Text style={styles.debugTitle}>🐛 Debug ({dbgLog.length}) — {deviceId.slice(0,12)} | room {roomIdForPreview?.slice(0,8) || 'none'} | {isPreviewing ? 'Đang phát' : 'Chưa phát'}</Text>
+            <TouchableOpacity onPress={() => setDbgLog([])}><Text style={styles.debugClear}>Xóa</Text></TouchableOpacity>
+            <TouchableOpacity onPress={() => setShowDbg(false)}><Text style={styles.debugClear}>Ẩn</Text></TouchableOpacity>
+          </View>
+          <ScrollView ref={dbgScrollRef} style={styles.debugScroll} contentContainerStyle={{ padding: 6 }} onContentSizeChange={() => dbgScrollRef.current?.scrollToEnd({ animated: true })}>
+            {dbgLog.length === 0 ? <Text style={styles.debugText}>Chưa có log — bấm Join rồi Phát preview</Text> : dbgLog.map((l, i) => <Text key={i} style={styles.debugText}>{l}</Text>)}
+          </ScrollView>
+        </View>
+      )}
+      {!showDbg && (
+        <TouchableOpacity style={styles.debugFab} onPress={() => setShowDbg(true)}>
+          <Text style={styles.debugFabText}>🐛 Hiện Debug</Text>
+        </TouchableOpacity>
+      )}
+
+      {/* Footer — trong Tabs bottom 0 là sát tabBar, không dùng insets để không tạo dải đen */}
+      <View style={[styles.footer, { bottom: 0, paddingBottom: spacing.md }]}>
         {roomIdForPreview && Platform.OS !== 'web' && (
           <TouchableOpacity
-            style={[styles.footerButton, isPreviewing ? { backgroundColor: colors.success } : { backgroundColor: '#334155' }]}
+            style={[styles.footerButton, isPreviewing ? { backgroundColor: colors.danger } : { backgroundColor: colors.success }, { flex: 1, maxWidth: 320 }]}
             onPress={async () => {
+              dbg(`Phát preview pressed isPreviewing=${isPreviewing} room=${roomIdForPreview?.slice(0,8)}`);
               if (isPreviewing) {
+                dbg('Ngắt preview → lưu');
                 mediasoupClientService.disconnect();
+                setLocalWrtcStream(null);
                 setIsPreviewing(false);
+                setIsFullscreenPreview(false);
+                // đợi CameraView remount (WebRTC đã nhả camera) rồi quay nhanh 3s để lưu như video
+                await new Promise(r=> setTimeout(r, 900));
+                try {
+                  if (!cameraService.isVideoRecording_()) {
+                    const ok = await streamingService.startRecording();
+                    dbg('preview save startRecording '+(ok?'OK':'fail'));
+                    if (ok) {
+                      await new Promise(r=> setTimeout(r, 3000));
+                      const uri = await streamingService.stopRecording();
+                      if (uri) {
+                        setIsSaving(true);
+                        const saved = await localStore.saveCapturedMedia(uri, 'video');
+                        setIsSaving(false);
+                        if (saved) { dbg('Đã lưu preview '+saved.fileName); Alert.alert('Đã lưu preview', saved.fileName); }
+                        else dbg('lưu preview fail');
+                      }
+                    }
+                  }
+                } catch(e:any){ setIsSaving(false); dbg('lưu preview lỗi '+String(e.message||e)); }
               } else {
                 try {
+                  dbg('startProducing begin');
                   await mediasoupClientService.startProducing(roomIdForPreview);
+                  const s = mediasoupClientService.getLocalStream();
+                  setLocalWrtcStream(s);
+                  const vt = s?.getVideoTracks?.()[0]; dbg(`local video enabled=${vt?.enabled} readyState=${vt?.readyState}`);
                   setIsPreviewing(true);
+                  dbg('Producing done isPreviewing=true');
                 } catch (e) {
-                  Alert.alert('Preview lỗi', String(e instanceof Error ? e.message : e));
+                  const msg = String(e instanceof Error ? e.message : e);
+                  dbg('Producing failed: '+msg);
+                  Alert.alert('Preview lỗi', msg);
                 }
               }
             }}>
-            <Text style={styles.footerButtonIcon}>{isPreviewing ? '📡' : '👁️'}</Text>
-            <Text style={styles.footerButtonText}>{isPreviewing ? 'Ngắt preview' : 'Phát preview'}</Text>
+            <Text style={styles.footerButtonIcon}>{isPreviewing ? '⏸️' : '📡'}</Text>
+            <Text style={styles.footerButtonText}>{isPreviewing ? 'Dừng' : 'Phát sóng'}</Text>
           </TouchableOpacity>
         )}
-        <TouchableOpacity
-          style={[styles.footerButton, styles.footerPhoto, isSaving && styles.footerDisabled]}
-          onPress={handleTakePicture}
-          disabled={!isCameraReady || isSaving}>
-          <Text style={styles.footerButtonIcon}>📸</Text>
-          <Text style={styles.footerButtonText}>Chụp ảnh</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={[
-            styles.footerButton,
-            isRecording ? styles.footerStop : styles.footerRecord,
-            isSaving && styles.footerDisabled,
-          ]}
-          onPress={isRecording ? handleStopRecording : handleStartRecording}
-          disabled={!isCameraReady || isSaving}>
-          <Text style={styles.footerButtonIcon}>{isRecording ? '⏹' : '🔴'}</Text>
-          <Text style={styles.footerButtonText}>
-            {isSaving ? 'Đang lưu...' : isRecording ? 'Dừng quay' : 'Quay video'}
-          </Text>
-        </TouchableOpacity>
+        {!roomIdForPreview && (
+          <View style={[styles.footerButton, { backgroundColor: '#64748b', maxWidth: 320 }]}>
+            <Text style={styles.footerButtonText}>Chưa join phòng</Text>
+          </View>
+        )}
       </View>
     </View>
   );
@@ -548,16 +618,33 @@ const styles = StyleSheet.create({
   camera: {
     flex: 1,
   },
+  cameraOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  cameraFullscreen: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 1,
+  },
   topBar: {
     position: 'absolute',
     top: 0,
     left: 0,
     right: 0,
-    paddingHorizontal: spacing.lg,
-    paddingBottom: spacing.md,
-    backgroundColor: colors.overlay,
-    borderBottomLeftRadius: radius.lg,
-    borderBottomRightRadius: radius.lg,
+    paddingHorizontal: spacing.md,
+    paddingBottom: spacing.sm,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    borderBottomLeftRadius: radius.md,
+    borderBottomRightRadius: radius.md,
+    zIndex: 20,
+    elevation: 20,
   },
   topBarRow: {
     flexDirection: 'row',
@@ -568,40 +655,16 @@ const styles = StyleSheet.create({
     flex: 1,
     marginRight: spacing.md,
   },
-  topBarTitle: {
-    color: colors.white,
-    fontSize: 17,
-    fontWeight: 'bold',
-  },
-  topBarDevice: {
-    color: colors.textMuted,
-    fontSize: 11,
-    marginTop: 2,
-    fontFamily: 'monospace',
-  },
-  settingsButton: {
-    width: 38,
-    height: 38,
-    borderRadius: radius.round,
-    backgroundColor: 'rgba(255, 255, 255, 0.15)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  settingsButtonText: {
-    fontSize: 18,
-  },
-  statusRow: {
-    flexDirection: 'row',
-    marginTop: spacing.md,
-    gap: spacing.sm,
-  },
-  chip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs + 2,
-    borderRadius: radius.round,
-  },
+  topBarTitle: { color: colors.white, fontSize: 14, fontWeight: '800' },
+  topBarDevice: { color: 'rgba(255,255,255,0.7)', fontSize: 10, marginTop: 1, fontFamily: 'monospace' },
+  hideButton: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: radius.round, backgroundColor: 'rgba(255,255,255,0.18)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.25)' },
+  hideButtonText: { color: '#fff', fontSize: 11, fontWeight: '700' },
+  showTopBarFab: { position: 'absolute', top: 0, right: spacing.md, backgroundColor: 'rgba(0,0,0,0.6)', paddingHorizontal: 12, paddingVertical: 6, borderRadius: radius.round, zIndex: 25, borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)' },
+  showTopBarText: { color: '#fff', fontSize: 11, fontWeight: '700' },
+  settingsButton: { width: 38, height: 38, borderRadius: radius.round, backgroundColor: 'rgba(255, 255, 255, 0.15)', justifyContent: 'center', alignItems: 'center' },
+  settingsButtonText: { fontSize: 18 },
+  statusRow: { flexDirection: 'row', marginTop: spacing.sm, gap: 6 },
+  chip: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, paddingVertical: 3, borderRadius: radius.round },
   chipSuccess: {
     backgroundColor: 'rgba(16, 185, 129, 0.2)',
   },
@@ -623,16 +686,8 @@ const styles = StyleSheet.create({
   dotDanger: {
     backgroundColor: colors.danger,
   },
-  chipText: {
-    color: colors.white,
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  alertBox: {
-    marginTop: spacing.md,
-    padding: spacing.md,
-    borderRadius: radius.md,
-  },
+  chipText: { color: colors.white, fontSize: 10, fontWeight: '700' },
+  alertBox: { marginTop: spacing.sm, padding: spacing.sm, borderRadius: radius.md },
   alertStreaming: {
     backgroundColor: 'rgba(245, 158, 11, 0.18)',
   },
@@ -642,16 +697,8 @@ const styles = StyleSheet.create({
   alertSaving: {
     backgroundColor: 'rgba(37, 99, 235, 0.25)',
   },
-  alertTitle: {
-    color: colors.white,
-    fontSize: 12,
-    fontWeight: 'bold',
-  },
-  alertSub: {
-    color: 'rgba(255, 255, 255, 0.7)',
-    fontSize: 10,
-    marginTop: 2,
-  },
+  alertTitle: { color: colors.white, fontSize: 11, fontWeight: '700' },
+  alertSub: { color: 'rgba(255,255,255,0.7)', fontSize: 9, marginTop: 1 },
   photoPreviewContainer: {
     position: 'absolute',
     top: spacing.xl + 24,
@@ -692,15 +739,24 @@ const styles = StyleSheet.create({
     backgroundColor: colors.overlay,
     borderTopLeftRadius: radius.lg,
     borderTopRightRadius: radius.lg,
+    zIndex: 20,
+    elevation: 20,
   },
   footerButton: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     flex: 1,
-    maxWidth: 220,
-    paddingVertical: spacing.md,
-    borderRadius: radius.round,
+    maxWidth: 300,
+    paddingVertical: 14,
+    borderRadius: 28,
+    shadowColor: '#000',
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
   },
   footerPhoto: {
     backgroundColor: colors.primary,
@@ -724,6 +780,60 @@ const styles = StyleSheet.create({
     color: colors.white,
     fontSize: 15,
     fontWeight: 'bold',
+  },
+  debugBox: {
+    position: 'absolute',
+    bottom: 80,
+    left: spacing.md,
+    right: spacing.md,
+    maxHeight: 140,
+    backgroundColor: 'rgba(15,23,42,0.92)',
+    borderRadius: radius.md,
+    padding: spacing.sm,
+    zIndex: 15,
+    elevation: 15,
+  },
+  debugHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  debugTitle: {
+    color: '#a5f3fc',
+    fontSize: 10,
+    fontWeight: '700',
+    flex: 1,
+  },
+  debugClear: {
+    color: '#f87171',
+    fontSize: 10,
+    fontWeight: '700',
+    paddingHorizontal: 8,
+  },
+  debugScroll: {
+    maxHeight: 140,
+  },
+  debugText: {
+    color: '#e2e8f0',
+    fontSize: 9,
+    fontFamily: 'monospace',
+    lineHeight: 12,
+  },
+  debugFab: {
+    position: 'absolute',
+    bottom: 80,
+    right: spacing.md,
+    backgroundColor: 'rgba(15,23,42,0.92)',
+    borderRadius: radius.round,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+    zIndex: 5,
+  },
+  debugFabText: {
+    color: '#a5f3fc',
+    fontSize: 10,
+    fontWeight: '700',
   },
   infoText: {
     fontSize: 18,
