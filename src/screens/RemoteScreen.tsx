@@ -23,7 +23,7 @@ import { useRouter } from 'expo-router';
 
 import { logger } from '../utils/logger';
 import { wsService } from '../services/websocket';
-import { cameraService, CameraMode } from '../services/camera';
+import { cameraService } from '../services/camera';
 import { streamingService } from '../services/streaming';
 import { localStore } from '../services/localStore';
 import { getDeviceId } from '../utils/device';
@@ -43,11 +43,9 @@ export default function RemoteScreen() {
   const isWeb = Platform.OS === 'web';
   const [permission, requestPermission] = useCameraPermissions();
   const [micPermission, requestMicPermission] = useMicrophonePermissions();
-  const [cameraMode, setCameraMode] = useState<CameraMode>('video');
   const [isCameraReady, setIsCameraReady] = useState(false);
   const [photoUri, setPhotoUri] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
-  const [isRecording, setIsRecording] = useState(false);
   const [wsConnected, setWsConnected] = useState(!ENABLE_SOCKET);
   const [streamingStats, setStreamingStats] = useState<any>(null);
   const [deviceId, setDeviceId] = useState<string>('');
@@ -80,8 +78,6 @@ export default function RemoteScreen() {
   // Refs giữ handler mới nhất để WebSocket handler (đăng ký 1 lần) không bị stale closure
   const handleStartStreamingRef = useRef<() => void>(() => {});
   const handleStopStreamingRef = useRef<() => void>(() => {});
-  const handleStartRecordingRef = useRef<() => void>(() => {});
-  const handleStopRecordingRef = useRef<() => void>(() => {});
 
   // Tạo unique device ID (cố định, được lưu trong AsyncStorage)
   const deviceName = useRef(`Remote Device`);
@@ -104,18 +100,6 @@ export default function RemoteScreen() {
   const { session } = useAuthSession();
   const isRemote = session?.accountRole === 'remote';
   useDeviceSync(deviceId, { enabled: !!deviceId && !!session && isRemote });
-  // Cho useDeviceSync nhả preview khi nhận start_record (WebRTC đang giữ camera)
-  useEffect(() => {
-    deviceSyncService.setPreviewDisconnect(() => {
-      if (isPreviewing) {
-        dbg('start_record → ngắt preview để quay');
-        mediasoupClientService.disconnect();
-        setLocalWrtcStream(null);
-        setIsPreviewing(false);
-        setIsFullscreenPreview(false);
-      }
-    });
-  }, [isPreviewing, dbg]);
 
   // Log insets ngay khi mount để debug Samsung đè bar
   useEffect(() => {
@@ -196,24 +180,10 @@ export default function RemoteScreen() {
       handleStopStreamingRef.current();
     });
 
-    // Lắng nghe tin nhắn RECORD_START từ controller -> quay video thật
-    const unsubscribeRecordStart = wsService.on('RECORD_START', message => {
-      logger.info('Received RECORD_START command', message);
-      handleStartRecordingRef.current();
-    });
-
-    // Lắng nghe tin nhắn RECORD_END từ controller -> dừng quay + upload
-    const unsubscribeRecordEnd = wsService.on('RECORD_END', message => {
-      logger.info('Received RECORD_END command', message);
-      handleStopRecordingRef.current();
-    });
-
     return () => {
       unsubscribeConnection();
       unsubscribeStreamStart();
       unsubscribeStreamEnd();
-      unsubscribeRecordStart();
-      unsubscribeRecordEnd();
       wsService.disconnect();
       streamingService.reset();
     };
@@ -285,92 +255,10 @@ export default function RemoteScreen() {
     setIsStreaming(false);
   }, []);
 
-  /**
-   * Xử lý bắt đầu quay video thật
-   * Chuyển camera sang chế độ video rồi mới record (expo-camera bắt buộc mode="video")
-   */
-  const handleStartRecording = useCallback(async () => {
-    if (isSaving) return;
-
-    if (!isCameraReady) {
-      Alert.alert('Lỗi', 'Camera chưa sẵn sàng');
-      return;
-    }
-
-    if (isRecording || cameraService.isVideoRecording_()) {
-      return;
-    }
-
-    logger.info('Starting video recording (handleStartRecording)', {
-      cameraMode,
-      isCameraReady,
-      cameraRefExists: cameraRef.current != null,
-      cameraServiceReady: cameraService.isReady_(),
-      micStatus: micPermission?.status ?? 'unknown',
-      micGranted: micPermission?.granted ?? false,
-    });
-
-    // Chuyển camera sang chế độ 'video'
-    setCameraMode('video');
-
-    // QUAN TRỌNG: iOS KHÔNG re-fire onCameraReady khi đổi mode (native chỉ reconfigure session).
-    // Không thể chờ onCameraReady -> phải gọi recordAsync trực tiếp sau khi native cấu hình xong.
-    // Chờ 1 chút cho native áp dụng mode="video" rồi gọi record; nếu session chưa sẵn sàng
-    // thì startVideoRecording sẽ tự retry bên trong camera service.
-    await new Promise(resolve => setTimeout(resolve, 500));
-
-    const started = await streamingService.startRecording();
-    logger.info('streamingService.startRecording result', { started, cameraMode });
-
-    if (started) {
-      setIsRecording(true);
-    } else {
-      setCameraMode('picture');
-      Alert.alert('Lỗi', 'Không thể bắt đầu quay video');
-    }
-  }, [isCameraReady, isRecording, isSaving, cameraMode, micPermission]);
-
-  /**
-   * Xử lý dừng quay video: dừng hẳn NGAY LẬP TỨC, lưu file vào bộ nhớ local
-   */
-  const handleStopRecording = useCallback(async () => {
-    logger.info('Stopping video recording');
-
-    // Dừng camera ngay lập tức
-    const uri = await streamingService.stopRecording();
-
-    // Trả camera về chế độ ảnh + thoát trạng thái đang quay ngay
-    setIsRecording(false);
-    setCameraMode('picture');
-
-    if (!uri) {
-      Alert.alert('Lỗi', 'Không lấy được file video');
-      return;
-    }
-
-    // Lưu file vào bộ nhớ local (không upload lên server)
-    setIsSaving(true);
-    try {
-      const saved = await localStore.saveCapturedMedia(uri, 'video');
-      if (saved) {
-        Alert.alert('Đã lưu', `Video đã lưu vào bộ nhớ: ${saved.fileName}`);
-      } else {
-        Alert.alert('Lỗi', 'Video đã quay nhưng lưu vào bộ nhớ thất bại');
-      }
-    } catch (error) {
-      logger.error('Failed to save video locally', error);
-      Alert.alert('Lỗi', 'Video đã quay nhưng lưu vào bộ nhớ thất bại');
-    } finally {
-      setIsSaving(false);
-    }
-  }, []);
-
   // Cập nhật refs với handler mới nhất mỗi lần render (để WS handler không bị stale closure)
   useEffect(() => {
     handleStartStreamingRef.current = handleStartStreaming;
     handleStopStreamingRef.current = handleStopStreaming;
-    handleStartRecordingRef.current = handleStartRecording;
-    handleStopRecordingRef.current = handleStopRecording;
   });
 
   // UI cho web platform (không hỗ trợ)
@@ -412,10 +300,9 @@ export default function RemoteScreen() {
           ref={cameraRef}
           style={styles.camera}
           facing="back"
-          mode={cameraMode}
+          mode="video"
           onCameraReady={() => {
             logger.info('Camera is ready (onCameraReady fired)', {
-              cameraMode,
               micStatus: micPermission?.status ?? 'unknown',
               micGranted: micPermission?.granted ?? false,
             });
@@ -429,7 +316,7 @@ export default function RemoteScreen() {
         />
       ) : RTCViewComp && localWrtcStream ? (
         // @ts-ignore
-        <RTCViewComp key={rtcKey} streamURL={localWrtcStream.toURL()} style={[styles.camera, isFullscreenPreview && styles.cameraFullscreen]} objectFit={isFullscreenPreview ? 'contain' : 'cover'} mirror={true} />
+        <RTCViewComp key={rtcKey} streamURL={localWrtcStream.toURL()} style={[styles.camera, isFullscreenPreview && styles.cameraFullscreen]} objectFit={isFullscreenPreview ? 'contain' : 'cover'} mirror={mediasoupClientService.getFacingMode() === 'user'} />
       ) : (
         <View style={[styles.camera, { justifyContent: 'center', alignItems: 'center', backgroundColor: '#000' }]}>
           <Text style={{ color: '#fff' }}>Đang mở camera WebRTC...</Text>
@@ -490,13 +377,6 @@ export default function RemoteScreen() {
             </View>
           )}
 
-        {isRecording && (
-          <View style={[styles.alertBox, styles.alertRecording]}>
-            <Text style={styles.alertTitle}>🔴 Đang quay video...</Text>
-            <Text style={styles.alertSub}>Video sẽ được lưu vào bộ nhớ khi dừng</Text>
-          </View>
-        )}
-
         {isSaving && (
           <View style={[styles.alertBox, styles.alertSaving]}>
             <Text style={styles.alertTitle}>💾 Đang lưu vào bộ nhớ...</Text>
@@ -506,7 +386,7 @@ export default function RemoteScreen() {
           <View style={[styles.alertBox, { backgroundColor: isPreviewing ? 'rgba(16,185,129,0.28)' : 'rgba(148,163,184,0.25)', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }]}>
             <View style={{ flex: 1 }}>
               <Text style={styles.alertTitle}>{isPreviewing ? '📡 Đang phát' : '📡 Đã join'} · {roomIdForPreview.slice(0, 6)}</Text>
-              <Text style={styles.alertSub}>{isPreviewing ? 'Ngắt sẽ tự lưu' : 'Sẵn sàng phát'}</Text>
+              <Text style={styles.alertSub}>{isPreviewing ? 'Đang phát live — bấm Rời phòng hoặc Dừng phát' : 'Sẵn sàng phát'}</Text>
             </View>
             <TouchableOpacity style={{ backgroundColor: 'rgba(239,68,68,0.9)', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8, marginLeft: 8 }} onPress={async () => {
               try { if (isPreviewing) { mediasoupClientService.disconnect(); setLocalWrtcStream(null); setIsPreviewing(false); setIsFullscreenPreview(false); } await leaveRoom(roomIdForPreview); setRoomIdForPreview(null); dbg('Đã rời phòng'); } catch(e:any){ Alert.alert('Lỗi rời phòng', String(e.message||e)); }
@@ -561,30 +441,12 @@ export default function RemoteScreen() {
             onPress={async () => {
               dbg(`Phát preview pressed isPreviewing=${isPreviewing} room=${roomIdForPreview?.slice(0,8)}`);
               if (isPreviewing) {
-                dbg('Ngắt preview → lưu');
+                // Dừng phát = server tự finalize file MP4 (recorder) và lưu vào Videos
+                dbg('Ngắt preview → server lưu broadcast');
                 mediasoupClientService.disconnect();
                 setLocalWrtcStream(null);
                 setIsPreviewing(false);
                 setIsFullscreenPreview(false);
-                // đợi CameraView remount (WebRTC đã nhả camera) rồi quay nhanh 3s để lưu như video
-                await new Promise(r=> setTimeout(r, 900));
-                try {
-                  if (!cameraService.isVideoRecording_()) {
-                    const ok = await streamingService.startRecording();
-                    dbg('preview save startRecording '+(ok?'OK':'fail'));
-                    if (ok) {
-                      await new Promise(r=> setTimeout(r, 3000));
-                      const uri = await streamingService.stopRecording();
-                      if (uri) {
-                        setIsSaving(true);
-                        const saved = await localStore.saveCapturedMedia(uri, 'video');
-                        setIsSaving(false);
-                        if (saved) { dbg('Đã lưu preview '+saved.fileName); Alert.alert('Đã lưu preview', saved.fileName); }
-                        else dbg('lưu preview fail');
-                      }
-                    }
-                  }
-                } catch(e:any){ setIsSaving(false); dbg('lưu preview lỗi '+String(e.message||e)); }
               } else {
                 try {
                   dbg('startProducing begin');
@@ -601,8 +463,8 @@ export default function RemoteScreen() {
                 }
               }
             }}>
-            <Text style={styles.footerButtonIcon}>{isPreviewing ? '⏸️' : '📡'}</Text>
-            <Text style={styles.footerButtonText}>{isPreviewing ? 'Dừng' : 'Phát sóng'}</Text>
+            <Text style={styles.footerButtonIcon}>{isPreviewing ? '⏹️' : '📡'}</Text>
+            <Text style={styles.footerButtonText}>{isPreviewing ? 'Dừng phát' : 'Phát sóng'}</Text>
           </TouchableOpacity>
         )}
         {!roomIdForPreview && (

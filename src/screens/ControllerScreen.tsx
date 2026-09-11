@@ -9,7 +9,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { Alert, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View, ActivityIndicator } from 'react-native';
 import { colors, spacing, radius } from '../constants/theme';
 import { logger } from '../utils/logger';
-import { createRoom, refreshInviteCode, joinRoom, leaveRoom, startRecording, stopRecording, setCameraConfig, closeRoom } from '../api/rooms';
+import { createRoom, refreshInviteCode, joinRoom, leaveRoom, setCameraConfig, closeRoom } from '../api/rooms';
 import { getDeviceId } from '../utils/device';
 import { useRoomSync } from '../hooks/useRoomSync';
 import { mediasoupService } from '../services/mediasoup';
@@ -72,26 +72,6 @@ export default function ControllerScreen() {
       const msg = e instanceof ApiError ? `[${e.code}] ${e.message}` : String(e);
       logger.error('refreshInviteCode failed', { msg, roomId });
       Alert.alert('Lỗi refresh mã', msg);
-    }
-  }, [roomId]);
-
-  const handleStart = useCallback(async () => {
-    if (!roomId) return;
-    try {
-      const r = await startRecording(roomId, { target: 'all', client_command_id: `cmd_${Date.now()}` });
-      Alert.alert('Đã gửi start_record', `targets: ${r.targets.join(',')} rejected: ${r.rejected.length}`);
-    } catch (e) {
-      Alert.alert('Lỗi', e instanceof ApiError ? e.message : 'startRecording failed');
-    }
-  }, [roomId]);
-
-  const handleStop = useCallback(async () => {
-    if (!roomId) return;
-    try {
-      const r = await stopRecording(roomId, { target: 'all', client_command_id: `cmd_${Date.now()}` });
-      Alert.alert('Đã gửi stop_record', `session ${r.session_id}`);
-    } catch (e) {
-      Alert.alert('Lỗi', e instanceof ApiError ? e.message : 'stopRecording failed');
     }
   }, [roomId]);
 
@@ -165,11 +145,6 @@ export default function ControllerScreen() {
               <TouchableOpacity style={[styles.smallBtn, { backgroundColor: colors.danger }]} onPress={async () => { await closeRoom(roomId); setRoomId(null); }}><Text style={styles.smallText}>Đóng phòng</Text></TouchableOpacity>
               <TouchableOpacity style={[styles.smallBtn, { backgroundColor: colors.textSecondary }]} onPress={async () => { await leaveRoom(roomId); setRoomId(null); }}><Text style={styles.smallText}>Rời phòng</Text></TouchableOpacity>
             </View>
-          </View>
-
-          <View style={styles.row}>
-            <TouchableOpacity style={[styles.actionBtn, { backgroundColor: colors.danger }]} onPress={handleStart}><Text style={styles.btnText}>● Start ALL</Text></TouchableOpacity>
-            <TouchableOpacity style={[styles.actionBtn, { backgroundColor: colors.textSecondary }]} onPress={handleStop}><Text style={styles.btnText}>■ Stop ALL</Text></TouchableOpacity>
           </View>
 
           {!isPreviewing ? (
