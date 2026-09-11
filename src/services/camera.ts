@@ -178,8 +178,10 @@ class CameraService {
           return false;
         }
 
-        // Chờ ngắn để bắt rejection sớm. Nếu không reject trong khoảng này => record đã bắt đầu.
-        const startError = await this.waitForRecordStart(this.recordingPromise, 300);
+        // Chờ trong ~1s để bắt rejection sớm. iOS có thể reject muộn sau khi
+        // reconfigure session sang video mode — nếu timeout quá ngắn (300ms) thì
+        // recordAsync reject sau đó sẽ làm mất/clip video mà ta tưởng đã bắt đầu.
+        const startError = await this.waitForRecordStart(this.recordingPromise, 1000);
         if (!startError) {
           logger.info('Video recording started', {
             attempt,
@@ -252,6 +254,19 @@ class CameraService {
 
       const recording = await this.recordingPromise;
       this.recordingUri = recording?.uri ?? null;
+
+      // Chờ file được flush xong trước khi trả uri (copyAsync sau đó nếu quá sớm
+      // sẽ bắt được file cụt — chỉ 3s dù quay lâu hơn). Đợi ngắn + verify size.
+      if (this.recordingUri) {
+        const fileSystem = (await import('expo-file-system')).default ?? await import('expo-file-system');
+        const fs = fileSystem as typeof import('expo-file-system');
+        for (let i = 0; i < 5; i++) {
+          const info = await fs.getInfoAsync(this.recordingUri!);
+          if (info.exists && (info as { size?: number }).size) break;
+          await new Promise(resolve => setTimeout(resolve, 300));
+        }
+      }
+
       this.isRecordingVideo = false;
       this.recordingPromise = null;
 
