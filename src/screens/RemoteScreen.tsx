@@ -265,7 +265,46 @@ export default function RemoteScreen() {
     });
   }, [isPreviewing, dbg]);
 
-  // Lệnh từ Controller: được duyệt (join_approved) / bị từ chối-kick (leave_room)
+  // Bật phát sóng (produce) — như nút "Phát sóng", dùng cho cả click lẫn lệnh từ Controller
+  const startBroadcast = useCallback(async () => {
+    if (isPreviewing) {
+      dbg('Đã đang phát sóng rồi — bỏ qua');
+      return;
+    }
+    if (!roomIdForPreview) {
+      dbg('startBroadcast: chưa ở trong phòng, bỏ qua');
+      return;
+    }
+    try {
+      dbg('startProducing begin (Controller kích hoạt)');
+      await mediasoupClientService.startProducing(roomIdForPreview);
+      const s = mediasoupClientService.getLocalStream();
+      setLocalWrtcStream(s);
+      // Giữ màn hình không tối/khoá — nếu màn hình ngủ, Android/Chrome ngừng
+      // bơm camera & WebRTC → file ghi bị "đứng" đúng quãng đó.
+      activateKeepAwake('broadcast');
+      const vt = s?.getVideoTracks?.()[0];
+      dbg(`local video enabled=${vt?.enabled} readyState=${vt?.readyState}`);
+      setIsPreviewing(true);
+      dbg('Producing done isPreviewing=true');
+    } catch (e) {
+      const msg = String(e instanceof Error ? e.message : e);
+      dbg('Producing failed: ' + msg);
+      Alert.alert('Preview lỗi', msg);
+    }
+  }, [isPreviewing, roomIdForPreview, dbg]);
+
+  // Dừng phát sóng — server tự finalize file MP4 (recorder) và lưu vào Videos
+  const stopBroadcast = useCallback(async () => {
+    dbg('Ngắt preview → server lưu broadcast');
+    deactivateKeepAwake('broadcast');
+    mediasoupClientService.disconnect();
+    setLocalWrtcStream(null);
+    setIsPreviewing(false);
+    setIsFullscreenPreview(false);
+  }, [dbg]);
+
+  // Lệnh từ Controller: được duyệt / bị kick / kích hoạt & dừng GHI (điều khiển nhiều app cùng lúc)
   useEffect(() => {
     const offApproved = deviceSyncService.onCommand('join_approved', async () => {
       dbg('Controller đã duyệt — có thể phát sóng');
@@ -280,11 +319,23 @@ export default function RemoteScreen() {
       setJoinPending(false);
       setRoomIdForPreview(null);
     });
+    // Controller bấm "Ghi ALL" → mọi Remote online có grant_control nhận start_record → tự phát sóng
+    const offStart = deviceSyncService.onCommand('start_record', async () => {
+      dbg('Controller → BẮT ĐẦU GHI: tự bật Phát sóng');
+      await startBroadcast();
+    });
+    // Controller bấm "Dừng ALL" → dừng phát, server auto-finalize MP4 cho từng Remote
+    const offStop = deviceSyncService.onCommand('stop_record', async () => {
+      dbg('Controller → DỪNG GHI: tự dừng Phát sóng (server lưu broadcast)');
+      await stopBroadcast();
+    });
     return () => {
       offApproved();
       offLeave();
+      offStart();
+      offStop();
     };
-  }, [dbg]);
+  }, [dbg, startBroadcast, stopBroadcast]);
 
   // Yêu cầu quyền Camera khi component mount
   useEffect(() => {
@@ -841,31 +892,9 @@ export default function RemoteScreen() {
                 `Phát preview pressed isPreviewing=${isPreviewing} room=${roomIdForPreview?.slice(0, 8)}`,
               );
               if (isPreviewing) {
-                // Dừng phát = server tự finalize file MP4 (recorder) và lưu vào Videos
-                dbg('Ngắt preview → server lưu broadcast');
-                deactivateKeepAwake('broadcast');
-                mediasoupClientService.disconnect();
-                setLocalWrtcStream(null);
-                setIsPreviewing(false);
-                setIsFullscreenPreview(false);
+                await stopBroadcast();
               } else {
-                try {
-                  dbg('startProducing begin');
-                  await mediasoupClientService.startProducing(roomIdForPreview);
-                  const s = mediasoupClientService.getLocalStream();
-                  setLocalWrtcStream(s);
-                  // Giữ màn hình không tối/khoá — nếu màn hình ngủ, Android/Chrome ngừng
-                  // bơm camera & WebRTC → file ghi bị "đứng" đúng quãng đó.
-                  activateKeepAwake('broadcast');
-                  const vt = s?.getVideoTracks?.()[0];
-                  dbg(`local video enabled=${vt?.enabled} readyState=${vt?.readyState}`);
-                  setIsPreviewing(true);
-                  dbg('Producing done isPreviewing=true');
-                } catch (e) {
-                  const msg = String(e instanceof Error ? e.message : e);
-                  dbg('Producing failed: ' + msg);
-                  Alert.alert('Preview lỗi', msg);
-                }
+                await startBroadcast();
               }
             }}>
             <Text style={styles.footerButtonIcon}>{isPreviewing ? '⏹️' : '📡'}</Text>
