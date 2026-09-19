@@ -15,10 +15,12 @@ import {
   ActivityIndicator,
   TouchableOpacity,
   ScrollView,
+  StatusBar as RNStatusBar,
 } from 'react-native';
 import { CameraView, useCameraPermissions, useMicrophonePermissions } from 'expo-camera';
+import { activateKeepAwake, deactivateKeepAwake } from 'expo-keep-awake';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { StatusBar as RNStatusBar } from 'react-native';
+
 import { useRouter } from 'expo-router';
 
 import { logger } from '../utils/logger';
@@ -27,7 +29,8 @@ import { cameraService } from '../services/camera';
 import { streamingService } from '../services/streaming';
 import { localStore } from '../services/localStore';
 import { getDeviceId } from '../utils/device';
-import { serverConfigService, ServerConfig } from '../services/serverConfig';
+import { serverConfigService, ServerConfig, LanRoom } from '../services/serverConfig';
+import { fetchLanRooms } from '../services/discovery';
 import { colors, spacing, radius } from '../constants/theme';
 import { ENABLE_SOCKET } from '../constants/config';
 import { useDeviceSync } from '../hooks/useDeviceSync';
@@ -53,7 +56,10 @@ export default function RemoteScreen() {
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [roomIdForPreview, setRoomIdForPreview] = useState<string | null>(null);
+  const [joinPending, setJoinPending] = useState(false);
   const [inviteInput, setInviteInput] = useState('');
+  const [openRooms, setOpenRooms] = useState<LanRoom[] | null>(null);
+  const [roomsLoading, setRoomsLoading] = useState(false);
   const [joinLog, setJoinLog] = useState<string[]>([]);
   const [dbgLog, setDbgLog] = useState<string[]>([]);
   const [showDbg, setShowDbg] = useState(true);
@@ -62,7 +68,13 @@ export default function RemoteScreen() {
   const [RTCViewComp, setRTCViewComp] = useState<any>(null);
   const [isFullscreenPreview, setIsFullscreenPreview] = useState(false);
   const [showTopBar, setShowTopBar] = useState(true);
-  useEffect(() => { if (isPreviewing && !RTCViewComp) { import('react-native-webrtc').then(m => setRTCViewComp(() => (m as any).RTCView)).catch(() => {}); } }, [isPreviewing, RTCViewComp]);
+  useEffect(() => {
+    if (isPreviewing && !RTCViewComp) {
+      import('react-native-webrtc')
+        .then(m => setRTCViewComp(() => (m as any).RTCView))
+        .catch(() => {});
+    }
+  }, [isPreviewing, RTCViewComp]);
   const dbgScrollRef = useRef<ScrollView>(null);
   const dbg = useCallback((m: string) => {
     const line = `${new Date().toLocaleTimeString()} ${m}`;
@@ -101,10 +113,137 @@ export default function RemoteScreen() {
   const isRemote = session?.accountRole === 'remote';
   useDeviceSync(deviceId, { enabled: !!deviceId && !!session && isRemote });
 
+  // Auto-join phòng LAN đã chọn ở màn đăng nhập — remote không cần gõ mã mời
+  const autoJoinedRef = useRef(false);
+  useEffect(() => {
+    if (!deviceId || !session || roomIdForPreview || autoJoinedRef.current) return;
+    let cancelled = false;
+    (async () => {
+      const lanRoom = await serverConfigService.loadLanRoom();
+      if (cancelled || autoJoinedRef.current || !lanRoom?.invite_code) return;
+      autoJoinedRef.current = true;
+      try {
+        dbg(`Auto-join phòng LAN "${lanRoom.room_name || lanRoom.invite_code}"`);
+        const r = await joinRoom({
+          invite_code: lanRoom.invite_code,
+          device_id: deviceId,
+          camera_name: 'Remote-' + deviceId.slice(0, 4),
+          grant_control: true,
+        });
+        setRoomIdForPreview(r.room_id);
+        const pending = r.member_join_status === 'pending';
+        setJoinPending(pending);
+        if (pending) dbg('Auto-join: đang chờ Controller duyệt');
+        else dbg(`Auto-join OK room=${r.room_id.slice(0, 6)}`);
+      } catch (e: any) {
+        autoJoinedRef.current = false;
+        dbg(`Auto-join thất bại: ${String(e?.message || e)}`);
+        serverConfigService.clearLanRoom();
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deviceId, session, roomIdForPreview]);
+
+  // Join phòng (dùng chung cho nút Join mã mời và danh sách phòng LAN)
+  const doJoin = useCallback(
+    async (code: string, roomName: string | null) => {
+      if (!deviceId) return;
+      const attemptJoin = async (): Promise<boolean> => {
+        const r = await joinRoom({
+          invite_code: code,
+          device_id: deviceId,
+          camera_name: 'Remote-' + deviceId.slice(0, 4),
+          grant_control: true,
+        });
+        await serverConfigService.saveLanRoom({
+          room_id: r.room_id,
+          room_name: roomName,
+          invite_code: code,
+          auto_approve: 1,
+        });
+        setRoomIdForPreview(r.room_id);
+        const pending = r.member_join_status === 'pending';
+        setJoinPending(pending);
+        return pending;
+      };
+      try {
+        dbg(`Join room "${roomName || code}"`);
+        const pending = await attemptJoin();
+        if (pending) {
+          dbg('Đã gửi yêu cầu join — chờ Controller duyệt');
+          Alert.alert('Đã gửi yêu cầu', 'Controller cần duyệt trước khi bạn phát sóng.');
+        } else {
+          dbg('join OK');
+          Alert.alert('Đã join', 'Đã vào phòng ' + (roomName || code));
+        }
+      } catch (e: any) {
+        // 1010 = thiết bị đang ở phòng KHÁC → rời phòng cũ rồi join lại phòng mới
+        if (String(e?.code) === '1010' && roomIdForPreview) {
+          dbg('Đang ở phòng khác (1010) — rời phòng cũ rồi join lại');
+          try {
+            await leaveRoom(roomIdForPreview);
+            setRoomIdForPreview(null);
+            setJoinPending(false);
+          } catch {}
+          try {
+            const pending = await attemptJoin();
+            dbg(
+              pending ? 'Đã join sau khi rời phòng cũ (chờ duyệt)' : 'Join OK sau khi rời phòng cũ',
+            );
+          } catch (e2: any) {
+            Alert.alert('Join lỗi', String(e2?.message || e2));
+          }
+          return;
+        }
+        Alert.alert('Join lỗi', String(e?.message || e));
+      }
+    },
+    [deviceId, dbg, roomIdForPreview],
+  );
+
+  // Tải danh sách phòng đang mở trên LAN (GET /rooms/discover) từ server đã cấu hình
+  const loadOpenRooms = useCallback(async () => {
+    if (!serverConfig) return;
+    setRoomsLoading(true);
+    try {
+      const rooms = await fetchLanRooms(
+        serverConfig.host,
+        Number(serverConfig.port) || 3000,
+        {},
+        3000,
+      );
+      setOpenRooms(rooms ?? []);
+      if (rooms && rooms.length === 0) dbg('Không có phòng nào đang mở trên LAN');
+    } catch (err: any) {
+      dbg('Lỗi tải phòng LAN: ' + String(err?.message || err));
+      setOpenRooms([]);
+    } finally {
+      setRoomsLoading(false);
+    }
+  }, [serverConfig, dbg]);
+
   // Log insets ngay khi mount để debug Samsung đè bar
   useEffect(() => {
-    dbg(`SAFE insets top=${insets.top} bottom=${insets.bottom} statusBarH=${RNStatusBar.currentHeight || 0}`);
+    setTimeout(() => {
+      dbg(
+        `SAFE insets top=${insets.top} bottom=${insets.bottom} statusBarH=${RNStatusBar.currentHeight || 0}`,
+      );
+    }, 0);
   }, [insets.top, insets.bottom, dbg]);
+
+  // Nếu màn hình bị Unmount giữa chừng khi đang phát → nhả keep-awake (tránh rò rỉ)
+  useEffect(() => {
+    return () => {
+      try {
+        deactivateKeepAwake('broadcast');
+      } catch {
+        /* noop */
+      }
+    };
+  }, []);
   // Theo dõi room_status — chỉ log khi đổi in_room/room_id để đỡ spam 3-5s polling
   const lastRoomRef = useRef<string>('0');
   useEffect(() => {
@@ -120,8 +259,32 @@ export default function RemoteScreen() {
         mediasoupClientService.disconnect();
         setIsPreviewing(false);
       }
+      if (!s.in_room) {
+        setJoinPending(false);
+      }
     });
   }, [isPreviewing, dbg]);
+
+  // Lệnh từ Controller: được duyệt (join_approved) / bị từ chối-kick (leave_room)
+  useEffect(() => {
+    const offApproved = deviceSyncService.onCommand('join_approved', async () => {
+      dbg('Controller đã duyệt — có thể phát sóng');
+      setJoinPending(false);
+    });
+    const offLeave = deviceSyncService.onCommand('leave_room', async cmd => {
+      const reason = ((cmd.payload as any)?.reason as string) ?? 'unknown';
+      dbg(`leave_room (${reason}) → thoát phòng`);
+      if (reason === 'denied') {
+        Alert.alert('Bị từ chối', 'Controller đã từ chối yêu cầu tham gia của bạn.');
+      }
+      setJoinPending(false);
+      setRoomIdForPreview(null);
+    });
+    return () => {
+      offApproved();
+      offLeave();
+    };
+  }, [dbg]);
 
   // Yêu cầu quyền Camera khi component mount
   useEffect(() => {
@@ -316,55 +479,116 @@ export default function RemoteScreen() {
         />
       ) : RTCViewComp && localWrtcStream ? (
         // @ts-ignore
-        <RTCViewComp key={rtcKey} streamURL={localWrtcStream.toURL()} style={[styles.camera, isFullscreenPreview && styles.cameraFullscreen]} objectFit={isFullscreenPreview ? 'contain' : 'cover'} mirror={mediasoupClientService.getFacingMode() === 'user'} />
+        <RTCViewComp
+          key={rtcKey}
+          streamURL={localWrtcStream.toURL()}
+          style={[styles.camera, isFullscreenPreview && styles.cameraFullscreen]}
+          objectFit={isFullscreenPreview ? 'contain' : 'cover'}
+          mirror={mediasoupClientService.getFacingMode() === 'user'}
+        />
       ) : (
-        <View style={[styles.camera, { justifyContent: 'center', alignItems: 'center', backgroundColor: '#000' }]}>
+        <View
+          style={[
+            styles.camera,
+            { justifyContent: 'center', alignItems: 'center', backgroundColor: '#000' },
+          ]}>
           <Text style={{ color: '#fff' }}>Đang mở camera WebRTC...</Text>
         </View>
       )}
 
       {showTopBar ? (
         <View style={[styles.topBar, { top: insets.top, paddingTop: spacing.md }]}>
-        <View style={styles.topBarRow}>
-          <View style={styles.topBarInfo}>
-            <Text style={styles.topBarTitle}>📷 Remote</Text>
-            <Text style={styles.topBarDevice} numberOfLines={1}>{deviceId ? deviceId.slice(0, 12) : '...'}</Text>
+          <View style={styles.topBarRow}>
+            <View style={styles.topBarInfo}>
+              <Text style={styles.topBarTitle}>📷 Remote</Text>
+              <Text style={styles.topBarDevice} numberOfLines={1}>
+                {deviceId ? deviceId.slice(0, 12) : '...'}
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={styles.hideButton}
+              onPress={() => setShowTopBar(v => !v)}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <Text style={styles.hideButtonText}>{showTopBar ? '🙈 Ẩn' : '👁️ Hiện'}</Text>
+            </TouchableOpacity>
           </View>
-          <TouchableOpacity
-            style={styles.hideButton}
-            onPress={() => setShowTopBar(v => !v)}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-            <Text style={styles.hideButtonText}>{showTopBar ? '🙈 Ẩn' : '👁️ Hiện'}</Text>
-          </TouchableOpacity>
-        </View>
 
-        {/* Status chips */}
-        <View style={styles.statusRow}>
-          {!ENABLE_SOCKET ? (
-            <View style={[styles.chip, styles.buttonDisabled]}>
-              <View style={[styles.chipDot, styles.dotDanger]} />
-              <Text style={styles.chipText}>Socket tạm tắt</Text>
+          {/* Status chips */}
+          <View style={styles.statusRow}>
+            {!ENABLE_SOCKET ? (
+              <View style={[styles.chip, styles.buttonDisabled]}>
+                <View style={[styles.chipDot, styles.dotDanger]} />
+                <Text style={styles.chipText}>Socket tạm tắt</Text>
+              </View>
+            ) : (
+              <View style={[styles.chip, wsConnected ? styles.chipSuccess : styles.chipDanger]}>
+                <View
+                  style={[styles.chipDot, wsConnected ? styles.dotSuccess : styles.dotDanger]}
+                />
+                <Text style={styles.chipText}>{wsConnected ? 'Đã kết nối' : 'Chưa kết nối'}</Text>
+              </View>
+            )}
+            <View style={[styles.chip, isCameraReady ? styles.chipSuccess : styles.chipDanger]}>
+              <View
+                style={[styles.chipDot, isCameraReady ? styles.dotSuccess : styles.dotDanger]}
+              />
+              <Text style={styles.chipText}>
+                {isCameraReady ? 'Camera sẵn sàng' : 'Đang mở camera'}
+              </Text>
             </View>
-          ) : (
-            <View style={[styles.chip, wsConnected ? styles.chipSuccess : styles.chipDanger]}>
-              <View style={[styles.chipDot, wsConnected ? styles.dotSuccess : styles.dotDanger]} />
-              <Text style={styles.chipText}>{wsConnected ? 'Đã kết nối' : 'Chưa kết nối'}</Text>
-            </View>
-          )}
-          <View style={[styles.chip, isCameraReady ? styles.chipSuccess : styles.chipDanger]}>
-            <View style={[styles.chipDot, isCameraReady ? styles.dotSuccess : styles.dotDanger]} />
-            <Text style={styles.chipText}>
-              {isCameraReady ? 'Camera sẵn sàng' : 'Đang mở camera'}
-            </Text>
           </View>
-        </View>
 
           {isPreviewing && (
-            <View style={[styles.alertBox, { backgroundColor: 'rgba(16,185,129,0.28)', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }]}>
-              <Text style={styles.alertTitle}>📡 Đang phát {mediasoupClientService.getFacingMode()==='user'?'cam trước':'cam sau'}</Text>
-              <View style={{flexDirection:'row',gap:6}}>
-                <TouchableOpacity style={{ backgroundColor: '#0f172a', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8 }} onPress={()=> setIsFullscreenPreview(v=>!v)}><Text style={{color:'#fff',fontWeight:'700',fontSize:12}}>{isFullscreenPreview?'🗗 Thu nhỏ':'⛶ Phóng to'}</Text></TouchableOpacity>
-                <TouchableOpacity style={{ backgroundColor: '#0f172a', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8 }} onPress={async()=>{ try{ const m=await mediasoupClientService.switchCamera(); const s=mediasoupClientService.getLocalStream(); setLocalWrtcStream(null); setTimeout(()=>{ setLocalWrtcStream(s); setRtcKey(k=>k+1); }, 50); dbg('Đổi cam → '+m); }catch(e:any){ dbg('Đổi cam lỗi '+String(e.message||e)); }}}><Text style={{color:'#fff',fontWeight:'700',fontSize:12}}>🔄 Đổi cam</Text></TouchableOpacity>
+            <View
+              style={[
+                styles.alertBox,
+                {
+                  backgroundColor: 'rgba(16,185,129,0.28)',
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                },
+              ]}>
+              <Text style={styles.alertTitle}>
+                📡 Đang phát{' '}
+                {mediasoupClientService.getFacingMode() === 'user' ? 'cam trước' : 'cam sau'}
+              </Text>
+              <View style={{ flexDirection: 'row', gap: 6 }}>
+                <TouchableOpacity
+                  style={{
+                    backgroundColor: '#0f172a',
+                    paddingHorizontal: 10,
+                    paddingVertical: 6,
+                    borderRadius: 8,
+                  }}
+                  onPress={() => setIsFullscreenPreview(v => !v)}>
+                  <Text style={{ color: '#fff', fontWeight: '700', fontSize: 12 }}>
+                    {isFullscreenPreview ? '🗗 Thu nhỏ' : '⛶ Phóng to'}
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={{
+                    backgroundColor: '#0f172a',
+                    paddingHorizontal: 10,
+                    paddingVertical: 6,
+                    borderRadius: 8,
+                  }}
+                  onPress={async () => {
+                    try {
+                      const m = await mediasoupClientService.switchCamera();
+                      const s = mediasoupClientService.getLocalStream();
+                      setLocalWrtcStream(null);
+                      setTimeout(() => {
+                        setLocalWrtcStream(s);
+                        setRtcKey(k => k + 1);
+                      }, 50);
+                      dbg('Đổi cam → ' + m);
+                    } catch (e: any) {
+                      dbg('Đổi cam lỗi ' + String(e.message || e));
+                    }
+                  }}>
+                  <Text style={{ color: '#fff', fontWeight: '700', fontSize: 12 }}>🔄 Đổi cam</Text>
+                </TouchableOpacity>
               </View>
             </View>
           )}
@@ -377,39 +601,188 @@ export default function RemoteScreen() {
             </View>
           )}
 
-        {isSaving && (
-          <View style={[styles.alertBox, styles.alertSaving]}>
-            <Text style={styles.alertTitle}>💾 Đang lưu vào bộ nhớ...</Text>
-          </View>
-        )}
-        {roomIdForPreview ? (
-          <View style={[styles.alertBox, { backgroundColor: isPreviewing ? 'rgba(16,185,129,0.28)' : 'rgba(148,163,184,0.25)', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }]}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.alertTitle}>{isPreviewing ? '📡 Đang phát' : '📡 Đã join'} · {roomIdForPreview.slice(0, 6)}</Text>
-              <Text style={styles.alertSub}>{isPreviewing ? 'Đang phát live — bấm Rời phòng hoặc Dừng phát' : 'Sẵn sàng phát'}</Text>
+          {isSaving && (
+            <View style={[styles.alertBox, styles.alertSaving]}>
+              <Text style={styles.alertTitle}>💾 Đang lưu vào bộ nhớ...</Text>
             </View>
-            <TouchableOpacity style={{ backgroundColor: 'rgba(239,68,68,0.9)', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8, marginLeft: 8 }} onPress={async () => {
-              try { if (isPreviewing) { mediasoupClientService.disconnect(); setLocalWrtcStream(null); setIsPreviewing(false); setIsFullscreenPreview(false); } await leaveRoom(roomIdForPreview); setRoomIdForPreview(null); dbg('Đã rời phòng'); } catch(e:any){ Alert.alert('Lỗi rời phòng', String(e.message||e)); }
-            }}>
-              <Text style={{ color: '#fff', fontWeight: '700', fontSize: 12 }}>Rời phòng</Text>
-            </TouchableOpacity>
-          </View>
-        ) : (
-          <View style={[styles.alertBox, { backgroundColor: 'rgba(37,99,235,0.18)' }]}>
-            <Text style={styles.alertTitle}>🔑 Nhập mã mời</Text>
-            <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
-              <TextInput value={inviteInput} onChangeText={t => setInviteInput(t.toUpperCase())} placeholder="ABCD12" placeholderTextColor="rgba(255,255,255,0.6)" autoCapitalize="characters" maxLength={12} style={{ flex: 1, backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 8, color: '#fff', fontFamily: 'monospace', borderWidth: 1, borderColor: 'rgba(255,255,255,0.3)' }} />
-              <TouchableOpacity style={{ backgroundColor: deviceId ? '#10b981' : '#64748b', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8 }} disabled={!deviceId} onPress={async () => {
-                const code = inviteInput.trim(); if(!code) return Alert.alert('Thiếu mã mời'); try{ const r = await joinRoom({ invite_code: code, device_id: deviceId, camera_name: 'Remote-'+deviceId.slice(0,4), grant_control: true }); setRoomIdForPreview(r.room_id); Alert.alert('Đã join', r.room_id); } catch(e:any){ Alert.alert('Join lỗi', String(e.message||e)); }
-              }}>
-                <Text style={{ color: '#fff', fontWeight: '700' }}>Join</Text>
+          )}
+          {roomIdForPreview ? (
+            <View
+              style={[
+                styles.alertBox,
+                {
+                  backgroundColor: joinPending
+                    ? 'rgba(245,158,11,0.25)'
+                    : isPreviewing
+                      ? 'rgba(16,185,129,0.28)'
+                      : 'rgba(148,163,184,0.25)',
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                },
+              ]}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.alertTitle}>
+                  {joinPending
+                    ? '⏳ Chờ Controller duyệt'
+                    : isPreviewing
+                      ? '📡 Đang phát'
+                      : '📡 Đã join'}{' '}
+                  · {roomIdForPreview.slice(0, 6)}
+                </Text>
+                <Text style={styles.alertSub}>
+                  {joinPending
+                    ? 'Yêu cầu của bạn đang chờ duyệt — chưa thể phát.'
+                    : isPreviewing
+                      ? 'Đang phát live — bấm Rời phòng hoặc Dừng phát'
+                      : 'Sẵn sàng phát'}
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={{
+                  backgroundColor: 'rgba(239,68,68,0.9)',
+                  paddingHorizontal: 12,
+                  paddingVertical: 6,
+                  borderRadius: 8,
+                  marginLeft: 8,
+                }}
+                onPress={async () => {
+                  try {
+                    if (isPreviewing) {
+                      mediasoupClientService.disconnect();
+                      setLocalWrtcStream(null);
+                      setIsPreviewing(false);
+                      setIsFullscreenPreview(false);
+                    }
+                    await leaveRoom(roomIdForPreview);
+                    setRoomIdForPreview(null);
+                    setJoinPending(false);
+                    dbg('Đã rời phòng');
+                  } catch (e: any) {
+                    Alert.alert('Lỗi rời phòng', String(e.message || e));
+                  }
+                }}>
+                <Text style={{ color: '#fff', fontWeight: '700', fontSize: 12 }}>Rời phòng</Text>
               </TouchableOpacity>
             </View>
-          </View>
-        )}
-      </View>
+          ) : (
+            <View style={[styles.alertBox, { backgroundColor: 'rgba(37,99,235,0.18)' }]}>
+              <Text style={styles.alertTitle}>🔑 Nhập mã mời</Text>
+              <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
+                <TextInput
+                  value={inviteInput}
+                  onChangeText={t => setInviteInput(t.toUpperCase())}
+                  placeholder="ABCD12"
+                  placeholderTextColor="rgba(255,255,255,0.6)"
+                  autoCapitalize="characters"
+                  maxLength={12}
+                  style={{
+                    flex: 1,
+                    backgroundColor: 'rgba(255,255,255,0.15)',
+                    borderRadius: 8,
+                    paddingHorizontal: 12,
+                    paddingVertical: 8,
+                    color: '#fff',
+                    fontFamily: 'monospace',
+                    borderWidth: 1,
+                    borderColor: 'rgba(255,255,255,0.3)',
+                  }}
+                />
+                <TouchableOpacity
+                  style={{
+                    backgroundColor: deviceId ? '#10b981' : '#64748b',
+                    paddingHorizontal: 16,
+                    paddingVertical: 8,
+                    borderRadius: 8,
+                  }}
+                  disabled={!deviceId}
+                  onPress={async () => {
+                    const code = inviteInput.trim();
+                    if (!code) return Alert.alert('Thiếu mã mời');
+                    doJoin(code, `Mã ${code}`);
+                  }}>
+                  <Text style={{ color: '#fff', fontWeight: '700' }}>Join</Text>
+                </TouchableOpacity>
+              </View>
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  marginTop: 12,
+                  borderTopWidth: 1,
+                  borderTopColor: 'rgba(255,255,255,0.15)',
+                  paddingTop: 10,
+                }}>
+                <Text style={{ color: '#fff', fontWeight: '700', fontSize: 12 }}>
+                  🏠 Phòng đang mở trên LAN
+                </Text>
+                <TouchableOpacity
+                  style={{
+                    backgroundColor: 'rgba(148,163,184,0.3)',
+                    paddingHorizontal: 10,
+                    paddingVertical: 5,
+                    borderRadius: 8,
+                  }}
+                  onPress={loadOpenRooms}>
+                  <Text style={{ color: '#fff', fontWeight: '700', fontSize: 12 }}>
+                    {roomsLoading ? '⏳ Đang quét...' : '🔄 Quét lại'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+              {openRooms && (
+                <View style={{ marginTop: 8 }}>
+                  {openRooms.length === 0 ? (
+                    <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12 }}>
+                      Không có phòng nào đang mở trên LAN.
+                    </Text>
+                  ) : (
+                    openRooms.slice(0, 6).map(r => (
+                      <View
+                        key={r.invite_code}
+                        style={{
+                          flexDirection: 'row',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          paddingVertical: 6,
+                          borderBottomWidth: 1,
+                          borderBottomColor: 'rgba(255,255,255,0.08)',
+                        }}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ color: '#fff', fontSize: 13, fontWeight: '600' }}>
+                            {r.room_name || 'Phòng không tên'}
+                          </Text>
+                          <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 11 }}>
+                            {r.member_count ?? 0} thành viên{r.auto_approve ? ' • vào tự do' : ''} ·{' '}
+                            <Text style={{ fontFamily: 'monospace' }}>{r.invite_code}</Text>
+                          </Text>
+                        </View>
+                        <TouchableOpacity
+                          style={{
+                            backgroundColor: '#10b981',
+                            paddingHorizontal: 14,
+                            paddingVertical: 6,
+                            borderRadius: 8,
+                            marginLeft: 8,
+                          }}
+                          disabled={!deviceId}
+                          onPress={() => doJoin(r.invite_code, r.room_name)}>
+                          <Text style={{ color: '#fff', fontWeight: '700', fontSize: 12 }}>
+                            Vào
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+                    ))
+                  )}
+                </View>
+              )}
+            </View>
+          )}
+        </View>
       ) : (
-        <TouchableOpacity style={[styles.showTopBarFab, { top: insets.top + 8 }]} onPress={() => setShowTopBar(true)}>
+        <TouchableOpacity
+          style={[styles.showTopBarFab, { top: insets.top + 8 }]}
+          onPress={() => setShowTopBar(true)}>
           <Text style={styles.showTopBarText}>👁️ Hiện</Text>
         </TouchableOpacity>
       )}
@@ -418,12 +791,31 @@ export default function RemoteScreen() {
       {showDbg && (
         <View style={styles.debugBox}>
           <View style={styles.debugHeader}>
-            <Text style={styles.debugTitle}>🐛 Debug ({dbgLog.length}) — {deviceId.slice(0,12)} | room {roomIdForPreview?.slice(0,8) || 'none'} | {isPreviewing ? 'Đang phát' : 'Chưa phát'}</Text>
-            <TouchableOpacity onPress={() => setDbgLog([])}><Text style={styles.debugClear}>Xóa</Text></TouchableOpacity>
-            <TouchableOpacity onPress={() => setShowDbg(false)}><Text style={styles.debugClear}>Ẩn</Text></TouchableOpacity>
+            <Text style={styles.debugTitle}>
+              🐛 Debug ({dbgLog.length}) — {deviceId.slice(0, 12)} | room{' '}
+              {roomIdForPreview?.slice(0, 8) || 'none'} | {isPreviewing ? 'Đang phát' : 'Chưa phát'}
+            </Text>
+            <TouchableOpacity onPress={() => setDbgLog([])}>
+              <Text style={styles.debugClear}>Xóa</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => setShowDbg(false)}>
+              <Text style={styles.debugClear}>Ẩn</Text>
+            </TouchableOpacity>
           </View>
-          <ScrollView ref={dbgScrollRef} style={styles.debugScroll} contentContainerStyle={{ padding: 6 }} onContentSizeChange={() => dbgScrollRef.current?.scrollToEnd({ animated: true })}>
-            {dbgLog.length === 0 ? <Text style={styles.debugText}>Chưa có log — bấm Join rồi Phát preview</Text> : dbgLog.map((l, i) => <Text key={i} style={styles.debugText}>{l}</Text>)}
+          <ScrollView
+            ref={dbgScrollRef}
+            style={styles.debugScroll}
+            contentContainerStyle={{ padding: 6 }}
+            onContentSizeChange={() => dbgScrollRef.current?.scrollToEnd({ animated: true })}>
+            {dbgLog.length === 0 ? (
+              <Text style={styles.debugText}>Chưa có log — bấm Join rồi Phát preview</Text>
+            ) : (
+              dbgLog.map((l, i) => (
+                <Text key={i} style={styles.debugText}>
+                  {l}
+                </Text>
+              ))
+            )}
           </ScrollView>
         </View>
       )}
@@ -435,14 +827,23 @@ export default function RemoteScreen() {
 
       {/* Footer — trong Tabs bottom 0 là sát tabBar, không dùng insets để không tạo dải đen */}
       <View style={[styles.footer, { bottom: 0, paddingBottom: spacing.md }]}>
-        {roomIdForPreview && Platform.OS !== 'web' && (
+        {roomIdForPreview && Platform.OS !== 'web' && !joinPending && (
           <TouchableOpacity
-            style={[styles.footerButton, isPreviewing ? { backgroundColor: colors.danger } : { backgroundColor: colors.success }, { flex: 1, maxWidth: 320 }]}
+            style={[
+              styles.footerButton,
+              isPreviewing
+                ? { backgroundColor: colors.danger }
+                : { backgroundColor: colors.success },
+              { flex: 1, maxWidth: 320 },
+            ]}
             onPress={async () => {
-              dbg(`Phát preview pressed isPreviewing=${isPreviewing} room=${roomIdForPreview?.slice(0,8)}`);
+              dbg(
+                `Phát preview pressed isPreviewing=${isPreviewing} room=${roomIdForPreview?.slice(0, 8)}`,
+              );
               if (isPreviewing) {
                 // Dừng phát = server tự finalize file MP4 (recorder) và lưu vào Videos
                 dbg('Ngắt preview → server lưu broadcast');
+                deactivateKeepAwake('broadcast');
                 mediasoupClientService.disconnect();
                 setLocalWrtcStream(null);
                 setIsPreviewing(false);
@@ -453,12 +854,16 @@ export default function RemoteScreen() {
                   await mediasoupClientService.startProducing(roomIdForPreview);
                   const s = mediasoupClientService.getLocalStream();
                   setLocalWrtcStream(s);
-                  const vt = s?.getVideoTracks?.()[0]; dbg(`local video enabled=${vt?.enabled} readyState=${vt?.readyState}`);
+                  // Giữ màn hình không tối/khoá — nếu màn hình ngủ, Android/Chrome ngừng
+                  // bơm camera & WebRTC → file ghi bị "đứng" đúng quãng đó.
+                  activateKeepAwake('broadcast');
+                  const vt = s?.getVideoTracks?.()[0];
+                  dbg(`local video enabled=${vt?.enabled} readyState=${vt?.readyState}`);
                   setIsPreviewing(true);
                   dbg('Producing done isPreviewing=true');
                 } catch (e) {
                   const msg = String(e instanceof Error ? e.message : e);
-                  dbg('Producing failed: '+msg);
+                  dbg('Producing failed: ' + msg);
                   Alert.alert('Preview lỗi', msg);
                 }
               }
@@ -466,6 +871,12 @@ export default function RemoteScreen() {
             <Text style={styles.footerButtonIcon}>{isPreviewing ? '⏹️' : '📡'}</Text>
             <Text style={styles.footerButtonText}>{isPreviewing ? 'Dừng phát' : 'Phát sóng'}</Text>
           </TouchableOpacity>
+        )}
+        {roomIdForPreview && joinPending && (
+          <View style={[styles.footerButton, { backgroundColor: '#b45309', maxWidth: 320 }]}>
+            <Text style={styles.footerButtonIcon}>⏳</Text>
+            <Text style={styles.footerButtonText}>Chờ Controller duyệt</Text>
+          </View>
         )}
         {!roomIdForPreview && (
           <View style={[styles.footerButton, { backgroundColor: '#64748b', maxWidth: 320 }]}>
@@ -530,15 +941,51 @@ const styles = StyleSheet.create({
     marginRight: spacing.md,
   },
   topBarTitle: { color: colors.white, fontSize: 14, fontWeight: '800' },
-  topBarDevice: { color: 'rgba(255,255,255,0.7)', fontSize: 10, marginTop: 1, fontFamily: 'monospace' },
-  hideButton: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: radius.round, backgroundColor: 'rgba(255,255,255,0.18)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.25)' },
+  topBarDevice: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 10,
+    marginTop: 1,
+    fontFamily: 'monospace',
+  },
+  hideButton: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: radius.round,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.25)',
+  },
   hideButtonText: { color: '#fff', fontSize: 11, fontWeight: '700' },
-  showTopBarFab: { position: 'absolute', top: 0, right: spacing.md, backgroundColor: 'rgba(0,0,0,0.6)', paddingHorizontal: 12, paddingVertical: 6, borderRadius: radius.round, zIndex: 25, borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)' },
+  showTopBarFab: {
+    position: 'absolute',
+    top: 0,
+    right: spacing.md,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: radius.round,
+    zIndex: 25,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+  },
   showTopBarText: { color: '#fff', fontSize: 11, fontWeight: '700' },
-  settingsButton: { width: 38, height: 38, borderRadius: radius.round, backgroundColor: 'rgba(255, 255, 255, 0.15)', justifyContent: 'center', alignItems: 'center' },
+  settingsButton: {
+    width: 38,
+    height: 38,
+    borderRadius: radius.round,
+    backgroundColor: 'rgba(255, 255, 255, 0.15)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   settingsButtonText: { fontSize: 18 },
   statusRow: { flexDirection: 'row', marginTop: spacing.sm, gap: 6 },
-  chip: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, paddingVertical: 3, borderRadius: radius.round },
+  chip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: radius.round,
+  },
   chipSuccess: {
     backgroundColor: 'rgba(16, 185, 129, 0.2)',
   },

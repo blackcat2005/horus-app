@@ -18,8 +18,11 @@ async function loadWebRTC(): Promise<any> {
       webrtc = await import('react-native-webrtc');
       (webrtc as unknown as { registerGlobals: () => void }).registerGlobals?.();
     } catch (e: any) {
-      const msg = 'webrtc native module not found — Expo Go không có react-native-webrtc. Chạy: npx expo prebuild && npx expo run:android (hoặc run:ios) để tạo dev-client, hoặc `eas build --profile development`. Không dùng `npx expo start` với Expo Go cho preview.';
-      logger.warn('react-native-webrtc not available (need dev-client)', { err: e?.message ?? String(e) });
+      const msg =
+        'webrtc native module not found — Expo Go không có react-native-webrtc. Chạy: npx expo prebuild && npx expo run:android (hoặc run:ios) để tạo dev-client, hoặc `eas build --profile development`. Không dùng `npx expo start` với Expo Go cho preview.';
+      logger.warn('react-native-webrtc not available (need dev-client)', {
+        err: e?.message ?? String(e),
+      });
       throw new Error(msg);
     }
   }
@@ -42,7 +45,7 @@ class MediasoupClientService {
   private sendTransport: Transport | null = null;
   private recvTransport: Transport | null = null;
   private localStream: any | null = null;
-  private consumers = new Map<string, { consumer: any; stream: any }>();
+  private consumers = new Map<string, { consumer: any; stream: any; memberId: string }>();
   private videoProducer: any | null = null;
   private audioProducer: any | null = null;
   private facingMode: 'user' | 'environment' = 'environment';
@@ -65,22 +68,32 @@ class MediasoupClientService {
     logger.info('mediasoup Device loaded', { canProduceVideo: this.device.canProduce('video') });
 
     // 3) Lấy local camera — thử facingMode theo state, audio bật echoCancellation để đỡ vọng
-    const audioConstraints: any = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+    const audioConstraints: any = {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    };
     try {
-      this.localStream = await (wrtc.mediaDevices as unknown as { getUserMedia: (c: unknown) => Promise<any> }).getUserMedia({
+      this.localStream = await (
+        wrtc.mediaDevices as unknown as { getUserMedia: (c: unknown) => Promise<any> }
+      ).getUserMedia({
         audio: audioConstraints,
         video: { facingMode: this.facingMode, width: 1280, height: 720, frameRate: 30 },
       });
     } catch (e) {
       logger.warn(`getUserMedia ${this.facingMode} 720p failed, retry 640p`, e);
       try {
-        this.localStream = await (wrtc.mediaDevices as unknown as { getUserMedia: (c: unknown) => Promise<any> }).getUserMedia({
+        this.localStream = await (
+          wrtc.mediaDevices as unknown as { getUserMedia: (c: unknown) => Promise<any> }
+        ).getUserMedia({
           audio: audioConstraints,
           video: { facingMode: this.facingMode, width: 640, height: 480, frameRate: 30 },
         });
       } catch (e2) {
         logger.warn(`getUserMedia ${this.facingMode} failed, retry fallback`, e2);
-        this.localStream = await (wrtc.mediaDevices as unknown as { getUserMedia: (c: unknown) => Promise<any> }).getUserMedia({
+        this.localStream = await (
+          wrtc.mediaDevices as unknown as { getUserMedia: (c: unknown) => Promise<any> }
+        ).getUserMedia({
           audio: audioConstraints,
           video: true,
         });
@@ -89,7 +102,10 @@ class MediasoupClientService {
 
     // 4) Tạo send transport qua server
     const trRes = (await mediasoupService.createTransportAsync('send')) as unknown as {
-      transport_id: string; ice_parameters: unknown; ice_candidates: unknown; dtls_parameters: unknown;
+      transport_id: string;
+      ice_parameters: unknown;
+      ice_candidates: unknown;
+      dtls_parameters: unknown;
     };
     this.sendTransport = this.device.createSendTransport({
       id: trRes.transport_id,
@@ -98,75 +114,117 @@ class MediasoupClientService {
       dtlsParameters: trRes.dtls_parameters as any,
     });
 
-    this.sendTransport.on('connect', async ({ dtlsParameters }: any, callback: any, errback: any) => {
-      try {
-        logger.info('sendTransport connect', { dtlsParameters });
-        await mediasoupService.connectTransportAsync(trRes.transport_id, dtlsParameters);
-        logger.info('sendTransport connected');
-        callback();
-      } catch (e) {
-        logger.error('sendTransport connect failed', e);
-        errback(e as Error);
-      }
-    });
-    this.sendTransport.on('connectionstatechange', (state: string) => logger.info('sendTransport connectionstatechange '+state));
-    this.sendTransport.on('produce', async ({ kind, rtpParameters }: any, callback: any, errback: any) => {
-      try {
-        logger.info('sendTransport produce kind='+kind);
-        const res = (await mediasoupService.produceAsync(trRes.transport_id, kind, rtpParameters)) as unknown as { producer_id: string };
-        logger.info('produced '+kind+' id='+res.producer_id);
-        callback({ id: res.producer_id });
-      } catch (e) {
-        logger.error('produce failed kind='+kind, e);
-        errback(e as Error);
-      }
-    });
+    this.sendTransport.on(
+      'connect',
+      async ({ dtlsParameters }: any, callback: any, errback: any) => {
+        try {
+          logger.info('sendTransport connect', { dtlsParameters });
+          await mediasoupService.connectTransportAsync(trRes.transport_id, dtlsParameters);
+          logger.info('sendTransport connected');
+          callback();
+        } catch (e) {
+          logger.error('sendTransport connect failed', e);
+          errback(e as Error);
+        }
+      },
+    );
+    this.sendTransport.on('connectionstatechange', (state: string) =>
+      logger.info('sendTransport connectionstatechange ' + state),
+    );
+    this.sendTransport.on(
+      'produce',
+      async ({ kind, rtpParameters }: any, callback: any, errback: any) => {
+        try {
+          logger.info('sendTransport produce kind=' + kind);
+          const res = (await mediasoupService.produceAsync(
+            trRes.transport_id,
+            kind,
+            rtpParameters,
+          )) as unknown as { producer_id: string };
+          logger.info('produced ' + kind + ' id=' + res.producer_id);
+          callback({ id: res.producer_id });
+        } catch (e) {
+          logger.error('produce failed kind=' + kind, e);
+          errback(e as Error);
+        }
+      },
+    );
 
     // 5) Produce (log track details before)
     const videoTrack = this.localStream.getVideoTracks()[0];
     const audioTrack = this.localStream.getAudioTracks()[0];
-    logger.info('localTracks', { video: videoTrack ? { enabled: videoTrack.enabled, muted: (videoTrack as any).muted, readyState: (videoTrack as any).readyState, settings: (videoTrack as any).getSettings?.() } : null, audio: audioTrack ? { enabled: audioTrack.enabled, readyState: (audioTrack as any).readyState } : null });
+    logger.info('localTracks', {
+      video: videoTrack
+        ? {
+            enabled: videoTrack.enabled,
+            muted: (videoTrack as any).muted,
+            readyState: (videoTrack as any).readyState,
+            settings: (videoTrack as any).getSettings?.(),
+          }
+        : null,
+      audio: audioTrack
+        ? { enabled: audioTrack.enabled, readyState: (audioTrack as any).readyState }
+        : null,
+    });
     if (videoTrack) this.videoProducer = await this.sendTransport.produce({ track: videoTrack });
     if (audioTrack) this.audioProducer = await this.sendTransport.produce({ track: audioTrack });
     logger.info('Producing done', { facingMode: this.facingMode });
     // poll connectionstate after 2s
-    setTimeout(()=> logger.info('sendTransport state after 2s ' + (this.sendTransport as any)?.connectionState), 2000);
+    setTimeout(
+      () =>
+        logger.info('sendTransport state after 2s ' + (this.sendTransport as any)?.connectionState),
+      2000,
+    );
   }
 
   public async switchCamera(): Promise<'user' | 'environment'> {
     this.facingMode = this.facingMode === 'user' ? 'environment' : 'user';
     if (!this.localStream || !this.videoProducer) {
-      logger.info('switchCamera no active producer, just toggle to '+this.facingMode);
+      logger.info('switchCamera no active producer, just toggle to ' + this.facingMode);
       return this.facingMode;
     }
     const wrtc = await loadWebRTC();
-    const newStream = await (wrtc.mediaDevices as unknown as { getUserMedia: (c: unknown) => Promise<any> }).getUserMedia({
+    const newStream = await (
+      wrtc.mediaDevices as unknown as { getUserMedia: (c: unknown) => Promise<any> }
+    ).getUserMedia({
       video: { facingMode: this.facingMode, width: 640, height: 480, frameRate: 15 },
       audio: false,
     });
     const newTrack = newStream.getVideoTracks()[0];
-    if (!newTrack) throw new Error('No video track for '+this.facingMode);
+    if (!newTrack) throw new Error('No video track for ' + this.facingMode);
     await this.videoProducer.replaceTrack({ track: newTrack });
     const oldTrack = this.localStream.getVideoTracks()[0];
-    try { oldTrack?.stop(); } catch {}
+    try {
+      oldTrack?.stop();
+    } catch {}
     // replace in localStream
     this.localStream.removeTrack(oldTrack);
     this.localStream.addTrack(newTrack);
-    logger.info('switchCamera done '+this.facingMode);
+    logger.info('switchCamera done ' + this.facingMode);
     return this.facingMode;
   }
-  public getFacingMode(): string { return this.facingMode; }
+  public getFacingMode(): string {
+    return this.facingMode;
+  }
 
   public stopProducing(): void {
-    try { this.localStream?.getTracks().forEach((t: any) => t.stop()); } catch {}
-    try { this.sendTransport?.close(); } catch {}
+    try {
+      this.localStream?.getTracks().forEach((t: any) => t.stop());
+    } catch {}
+    try {
+      this.sendTransport?.close();
+    } catch {}
     this.sendTransport = null;
     this.localStream = null;
     this.videoProducer = null;
     this.audioProducer = null;
   }
 
-  public async startConsuming(roomId: string, onStream: (memberId: string, stream: any) => void): Promise<() => void> {
+  public async startConsuming(
+    roomId: string,
+    onStream: (memberId: string, stream: any) => void,
+    onClose?: (memberId: string) => void,
+  ): Promise<() => void> {
     const ms = await loadMediasoup();
     await loadWebRTC();
 
@@ -182,7 +240,10 @@ class MediasoupClientService {
 
     // Tạo recv transport
     const trRes = (await mediasoupService.createTransportAsync('recv')) as unknown as {
-      transport_id: string; ice_parameters: unknown; ice_candidates: unknown; dtls_parameters: unknown;
+      transport_id: string;
+      ice_parameters: unknown;
+      ice_candidates: unknown;
+      dtls_parameters: unknown;
     };
     this.recvTransport = this.device.createRecvTransport({
       id: trRes.transport_id,
@@ -190,20 +251,29 @@ class MediasoupClientService {
       iceCandidates: trRes.ice_candidates as any,
       dtlsParameters: trRes.dtls_parameters as any,
     });
-    this.recvTransport.on('connect', async ({ dtlsParameters }: any, callback: any, errback: any) => {
-      try {
-        await mediasoupService.connectTransportAsync(trRes.transport_id, dtlsParameters);
-        callback();
-      } catch (e) { errback(e as Error); }
-    });
+    this.recvTransport.on(
+      'connect',
+      async ({ dtlsParameters }: any, callback: any, errback: any) => {
+        try {
+          await mediasoupService.connectTransportAsync(trRes.transport_id, dtlsParameters);
+          callback();
+        } catch (e) {
+          errback(e as Error);
+        }
+      },
+    );
 
     // Lấy danh sách producer hiện có
     try {
-      const list = (await mediasoupService.getProducersAsync()) as unknown as { producers: { member_id: string; producer_id: string; kind: string }[] };
+      const list = (await mediasoupService.getProducersAsync()) as unknown as {
+        producers: { member_id: string; producer_id: string; kind: string }[];
+      };
       for (const p of list.producers ?? []) {
         await this.consumeOne(p.member_id, p.producer_id, onStream);
       }
-    } catch (e) { logger.warn('getProducers failed', e); }
+    } catch (e) {
+      logger.warn('getProducers failed', e);
+    }
 
     // Lắng new-producer / producer-closed
     const offNew = mediasoupService.on('new-producer', async msg => {
@@ -212,19 +282,45 @@ class MediasoupClientService {
     });
     const offClosed = mediasoupService.on('producer-closed', msg => {
       const m = msg as unknown as { producer_id: string };
-      const entry = [...this.consumers.entries()].find(([, v]) => v.consumer.producerId === m.producer_id);
-      if (entry) { try { entry[1].consumer.close(); } catch {} this.consumers.delete(entry[0]); }
+      const entry = [...this.consumers.entries()].find(
+        ([, v]) => v.consumer.producerId === m.producer_id,
+      );
+      if (entry) {
+        try {
+          entry[1].consumer.close();
+        } catch {}
+        this.consumers.delete(entry[0]);
+        onClose?.(entry[1].memberId);
+      }
     });
 
-    return () => { offNew(); offClosed(); try { this.recvTransport?.close(); } catch {} this.recvTransport = null; };
+    return () => {
+      offNew();
+      offClosed();
+      try {
+        this.recvTransport?.close();
+      } catch {}
+      this.recvTransport = null;
+    };
   }
 
-  private async consumeOne(memberId: string, producerId: string, onStream: (memberId: string, stream: any) => void): Promise<void> {
+  private async consumeOne(
+    memberId: string,
+    producerId: string,
+    onStream: (memberId: string, stream: any) => void,
+  ): Promise<void> {
     if (!this.device || !this.recvTransport) return;
     if ([...this.consumers.values()].some(v => v.consumer.producerId === producerId)) return;
     try {
-      const res = (await mediasoupService.consumeAsync(this.recvTransport.id, producerId, this.device.rtpCapabilities)) as unknown as {
-        consumer_id: string; producer_id: string; kind: string; rtp_parameters: unknown;
+      const res = (await mediasoupService.consumeAsync(
+        this.recvTransport.id,
+        producerId,
+        this.device.rtpCapabilities,
+      )) as unknown as {
+        consumer_id: string;
+        producer_id: string;
+        kind: string;
+        rtp_parameters: unknown;
       };
       const consumer = await this.recvTransport.consume({
         id: res.consumer_id,
@@ -235,16 +331,38 @@ class MediasoupClientService {
       const stream = new (await loadWebRTC()).MediaStream();
       // @ts-ignore react-native-webrtc MediaStream addTrack
       (stream as unknown as { addTrack: (t: unknown) => void }).addTrack(consumer.track);
-      this.consumers.set(consumer.id, { consumer, stream });
+      this.consumers.set(consumer.id, { consumer, stream, memberId });
       onStream(memberId, stream as unknown as any);
       await mediasoupService.resumeConsumerAsync(consumer.id);
+      if (consumer.kind === 'video' && typeof consumer.requestKeyFrame === 'function') {
+        consumer.requestKeyFrame().catch(() => undefined);
+        setTimeout(() => {
+          try {
+            consumer.requestKeyFrame().catch(() => {});
+          } catch {}
+        }, 300);
+      }
       logger.info('Consuming', { producerId, memberId });
-    } catch (e) { logger.error('consumeOne failed', e); }
+    } catch (e) {
+      logger.error('consumeOne failed', e);
+    }
   }
 
-  public getLocalStream(): any | null { return this.localStream; }
-  public getConsumers(): Map<string, { consumer: any; stream: any }> { return this.consumers; }
-  public disconnect(): void { this.stopProducing(); try { this.recvTransport?.close(); } catch {} this.recvTransport = null; this.consumers.clear(); mediasoupService.disconnect(); }
+  public getLocalStream(): any | null {
+    return this.localStream;
+  }
+  public getConsumers(): Map<string, { consumer: any; stream: any; memberId: string }> {
+    return this.consumers;
+  }
+  public disconnect(): void {
+    this.stopProducing();
+    try {
+      this.recvTransport?.close();
+    } catch {}
+    this.recvTransport = null;
+    this.consumers.clear();
+    mediasoupService.disconnect();
+  }
 }
 
 export const mediasoupClientService = new MediasoupClientService();

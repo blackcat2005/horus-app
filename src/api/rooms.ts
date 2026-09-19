@@ -13,7 +13,16 @@ export interface RoomCreateData {
   invite_code: string;
   expires_at: string;
   owner_device_id: string;
+  open_for_join: number;
   created_at: string;
+}
+
+export interface LanRoom {
+  room_id: string | null;
+  room_name: string | null;
+  invite_code: string;
+  auto_approve: number;
+  member_count?: number;
 }
 
 export interface RoomJoinData {
@@ -21,6 +30,8 @@ export interface RoomJoinData {
   room_name: string | null;
   owner: { device_id: string; camera_name: string | null };
   member_id: string;
+  /** 'pending' khi room auto_approve=0 — chờ Controller duyệt mới được phát */
+  member_join_status: 'approved' | 'pending';
   members: RoomMember[];
 }
 
@@ -39,6 +50,7 @@ export interface RoomMember {
   upload_state: string | null;
   upload_percent: number | null;
   error_code: string | null;
+  join_status: string | null;
   preview_url: string | null;
   last_seen: string | null;
 }
@@ -49,6 +61,8 @@ export interface SyncRoomData {
   next_sync_in: number;
   room: { status: string; session_id: string | null; started_at: string | null };
   members: RoomMember[];
+  /** Danh sách đang chờ Controller duyệt (chỉ owner nhìn thấy) */
+  pending: RoomMember[];
   joined: RoomMember[];
   left: string[];
 }
@@ -72,7 +86,13 @@ export interface RecordingStartData {
 export interface RecordingStopData {
   session_id: string;
   stopped_at: string;
-  results: { member_id: string; local_video_uid: string | null; duration: number | null; size: number | null; status: string }[];
+  results: {
+    member_id: string;
+    local_video_uid: string | null;
+    duration: number | null;
+    size: number | null;
+    status: string;
+  }[];
 }
 
 export interface CameraConfigData {
@@ -82,9 +102,34 @@ export interface CameraConfigData {
   has_flash: boolean | number;
 }
 
+export interface MyRoom {
+  room_id: string;
+  room_name: string | null;
+  invite_code: string;
+  open_for_join: number;
+  auto_approve: number;
+  status: 'open' | 'closed';
+  member_count: number;
+  max_members: number;
+  created_at: string;
+}
+
 // ── Endpoints ──
-export async function createRoom(payload: { room_name?: string; max_members?: number } = {}): Promise<RoomCreateData> {
+export async function createRoom(
+  payload: {
+    room_name?: string;
+    max_members?: number;
+    auto_approve?: 0 | 1;
+    /** 1 = hiển thị phòng trên LAN để phone khác join không cần mã mời */
+    open_for_join?: 0 | 1;
+  } = {},
+): Promise<RoomCreateData> {
   return apiRequest('/rooms', { method: 'POST', body: payload });
+}
+
+/** CRUD phía controller: danh sách các phòng của tài khoản (để quản lý/xóa phòng cũ). */
+export async function listMyRooms(): Promise<{ rooms: MyRoom[] }> {
+  return apiRequest('/rooms/mine');
 }
 
 export async function joinRoom(payload: {
@@ -96,7 +141,9 @@ export async function joinRoom(payload: {
   return apiRequest('/rooms/join', { method: 'POST', body: payload });
 }
 
-export async function getRoomMembers(roomId: string): Promise<{ members: RoomMember[]; total: number }> {
+export async function getRoomMembers(
+  roomId: string,
+): Promise<{ members: RoomMember[]; total: number }> {
   return apiRequest(`/rooms/${roomId}/members`);
 }
 
@@ -105,7 +152,9 @@ export async function syncRoom(roomId: string, since?: number): Promise<SyncRoom
   return apiRequest(`/rooms/${roomId}/sync${qs}`);
 }
 
-export async function refreshInviteCode(roomId: string): Promise<{ invite_code: string; expires_at: string }> {
+export async function refreshInviteCode(
+  roomId: string,
+): Promise<{ invite_code: string; expires_at: string }> {
   return apiRequest(`/rooms/${roomId}/invite-code`, { method: 'POST' });
 }
 
@@ -113,7 +162,25 @@ export async function kickMember(roomId: string, memberId: string): Promise<Reco
   return apiRequest(`/rooms/${roomId}/members/${memberId}`, { method: 'DELETE' });
 }
 
-export async function closeRoom(roomId: string): Promise<{ closed_at: string; session_stopped: number }> {
+/** Owner duyệt thiết bị đăng ký join (room auto_approve=0) */
+export async function approveMember(
+  roomId: string,
+  memberId: string,
+): Promise<{ member: RoomMember }> {
+  return apiRequest(`/rooms/${roomId}/members/${memberId}/approve`, { method: 'POST' });
+}
+
+/** Owner từ chối thiết bị đăng ký join — Remote nhận lệnh leave_room */
+export async function denyMember(
+  roomId: string,
+  memberId: string,
+): Promise<{ member_id: string; join_status: string }> {
+  return apiRequest(`/rooms/${roomId}/members/${memberId}/deny`, { method: 'POST' });
+}
+
+export async function closeRoom(
+  roomId: string,
+): Promise<{ closed_at: string; session_stopped: number }> {
   return apiRequest(`/rooms/${roomId}`, { method: 'DELETE' });
 }
 
@@ -141,7 +208,11 @@ export async function getPreviewToken(
 
 export async function startRecording(
   roomId: string,
-  payload: { target: 'all' | string[]; config?: Record<string, unknown>; client_command_id: string },
+  payload: {
+    target: 'all' | string[];
+    config?: Record<string, unknown>;
+    client_command_id: string;
+  },
 ): Promise<RecordingStartData> {
   return apiRequest(`/rooms/${roomId}/recording/start`, { method: 'POST', body: payload });
 }
@@ -156,9 +227,16 @@ export async function stopRecording(
 export async function setCameraConfig(
   roomId: string,
   memberId: string,
-  payload: { flash_mode: 'off' | 'on' | 'auto' | 'torch'; zoom_factor: number; client_command_id: string },
+  payload: {
+    flash_mode: 'off' | 'on' | 'auto' | 'torch';
+    zoom_factor: number;
+    client_command_id: string;
+  },
 ): Promise<{ member_id: string; flash_mode: string; zoom_factor: number; applied_at: string }> {
-  return apiRequest(`/rooms/${roomId}/members/${memberId}/camera`, { method: 'PUT', body: payload });
+  return apiRequest(`/rooms/${roomId}/members/${memberId}/camera`, {
+    method: 'PUT',
+    body: payload,
+  });
 }
 
 export async function getCameraConfig(roomId: string, memberId: string): Promise<CameraConfigData> {

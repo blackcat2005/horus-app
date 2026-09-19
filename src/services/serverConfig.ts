@@ -13,7 +13,17 @@ export interface ServerConfig {
   port: string;
 }
 
+/** Phòng "mở trên LAN" chọn từ màn đăng nhập — Remote join mà không cần gõ mã. */
+export interface LanRoom {
+  room_id: string | null;
+  room_name: string | null;
+  invite_code: string;
+  auto_approve: number;
+  member_count?: number;
+}
+
 const STORAGE_KEY = 'server_config';
+const LAN_ROOM_KEY = 'lan_room';
 
 export const DEFAULT_SERVER_CONFIG: ServerConfig = {
   host: Constants.expoConfig?.extra?.wsHost ?? '192.168.1.101',
@@ -112,6 +122,36 @@ class ServerConfigService {
    */
   public apiUrl(config: ServerConfig): string {
     return `${this.httpUrl(config)}/it4788/api/v1`;
+  }
+
+  /** Lưu phòng LAN đã chọn để Remote tự join sau đăng nhập. */
+  public async saveLanRoom(room: LanRoom): Promise<void> {
+    try {
+      await AsyncStorage.setItem(LAN_ROOM_KEY, JSON.stringify(room));
+      logger.info('Lan room saved', room);
+    } catch (error) {
+      logger.error('Failed to save lan room', error);
+    }
+  }
+
+  public async loadLanRoom(): Promise<LanRoom | null> {
+    try {
+      const raw = await AsyncStorage.getItem(LAN_ROOM_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as LanRoom;
+      return parsed?.invite_code ? parsed : null;
+    } catch (error) {
+      logger.error('Failed to load lan room', error);
+      return null;
+    }
+  }
+
+  public async clearLanRoom(): Promise<void> {
+    try {
+      await AsyncStorage.removeItem(LAN_ROOM_KEY);
+    } catch (error) {
+      logger.error('Failed to clear lan room', error);
+    }
   }
 }
 

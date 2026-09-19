@@ -73,7 +73,7 @@ export interface SyncDevicePayload {
 
 export interface PendingCommand {
   command_id: string;
-  type: 'start_record' | 'stop_record' | 'camera_config' | 'leave_room';
+  type: 'start_record' | 'stop_record' | 'camera_config' | 'leave_room' | 'join_approved';
   payload: Record<string, unknown>;
   issued_at: string;
 }

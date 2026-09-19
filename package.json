@@ -19,8 +19,10 @@
     "expo-crypto": "~15.0.9",
     "expo-dev-client": "~6.0.21",
     "expo-file-system": "~18.0.9",
+    "expo-keep-awake": "~15.0.8",
     "expo-linking": "~8.0.12",
     "expo-media-library": "~18.2.1",
+    "expo-network": "~8.0.8",
     "expo-router": "~6.0.24",
     "expo-status-bar": "~3.0.9",
     "js-sha256": "^1.0.0",
@@ -32,10 +34,12 @@
     "react-native-screens": "~4.16.0",
     "react-native-web": "^0.21.0",
     "react-native-webrtc": "^124.0.5",
+    "react-native-zeroconf": "^0.14.0",
     "react-refresh": "^0.14.0"
   },
   "devDependencies": {
     "@types/react": "~19.1.10",
+    "@types/react-native-zeroconf": "^0.13.1",
     "eslint": "^9.39.5",
     "eslint-config-expo": "^57.0.1",
     "eslint-config-prettier": "^10.1.8",

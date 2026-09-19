@@ -26,6 +26,7 @@ import { logout } from '../api/auth';
 import { getDeviceId } from '../utils/device';
 import { logger } from '../utils/logger';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { discoverServers, DiscoveredServer } from '../services/discovery';
 
 export default function SettingsScreen() {
   const [host, setHost] = useState('');
@@ -35,6 +36,8 @@ export default function SettingsScreen() {
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<string | null>(null);
+  const [isScanning, setIsScanning] = useState(false);
+  const [foundServers, setFoundServers] = useState<DiscoveredServer[] | null>(null);
   const [account, setAccount] = useState<{ name: string; role: string; phone: string } | null>(
     null,
   );
@@ -140,6 +143,43 @@ export default function SettingsScreen() {
     }
   }, [host, port]);
 
+  const handleScan = useCallback(async () => {
+    setIsScanning(true);
+    setFoundServers(null);
+    setTestResult(null);
+    try {
+      const servers = await discoverServers(5000);
+      setFoundServers(servers);
+      if (servers.length === 0) {
+        Alert.alert(
+          'Không tìm thấy server',
+          'Không thấy server Multicam nào trên mạng LAN. Kiểm tra:\n' +
+            '• Điện thoại và máy chạy server cùng 1 wifi\n' +
+            '• Server đang chạy (discovery mDNS + UDP 55666)\n' +
+            '• Hoặc nhập IP/port thủ công bên dưới.',
+        );
+      }
+    } catch (err) {
+      logger.error('Scan failed', err);
+      Alert.alert('Quét lỗi', 'Không thực hiện được quét mạng (cần dev build có react-native-zeroconf).');
+    } finally {
+      setIsScanning(false);
+    }
+  }, []);
+
+  const handlePickServer = useCallback(
+    (s: DiscoveredServer) => {
+      const ip = s.host || s.addresses[0] || '';
+      const port = String(s.port || 3000);
+      if (!ip) return;
+      setHost(ip);
+      setPort(port);
+      setFoundServers(null);
+      Alert.alert('Đã chọn server', `${ip}:${port} (${s.txt?.server_name || s.name}) — bấm 💾 Lưu để áp dụng.`);
+    },
+    [],
+  );
+
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -203,6 +243,32 @@ export default function SettingsScreen() {
                   <Text style={styles.buttonGhostText}>{isTesting ? '...' : '📡 Test'}</Text>
                 </TouchableOpacity>
               </View>
+
+              <TouchableOpacity
+                style={[styles.button, styles.scanButton, isScanning && styles.buttonDisabled]}
+                onPress={handleScan}
+                disabled={isScanning}>
+                <Text style={styles.scanButtonText}>{isScanning ? 'Đang quét mạng...' : '🔎 Quét server (mDNS)'}</Text>
+              </TouchableOpacity>
+
+              {foundServers && foundServers.length > 0 && (
+                <View style={styles.scanResults}>
+                  {foundServers.map(s => {
+                    const ip = s.host || s.addresses[0] || '';
+                    const label = s.txt?.server_name || s.name || `${ip}:${s.port}`;
+                    return (
+                      <TouchableOpacity key={`${ip}:${s.port}`} style={styles.scanItem} onPress={() => handlePickServer(s)}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.scanItemName}>{label}</Text>
+                          <Text style={styles.scanItemSub}>{ip}:{s.port}</Text>
+                        </View>
+                        <Text style={styles.scanItemPick}>Chọn ›</Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                  <Text style={styles.scanNote}>Tap một server để điền IP/Port, sau đó bấm 💾 Lưu.</Text>
+                </View>
+              )}
 
               {testResult && (
                 <View
@@ -308,6 +374,49 @@ const styles = StyleSheet.create({
   },
   testFailText: {
     color: colors.dangerDark,
+  },
+  scanButton: {
+    backgroundColor: colors.primaryLight,
+    marginTop: spacing.sm,
+  },
+  scanButtonText: {
+    color: colors.primaryDark,
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  scanResults: {
+    marginTop: spacing.md,
+    gap: spacing.sm,
+  },
+  scanItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.background,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  scanItemName: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: colors.text,
+  },
+  scanItemSub: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    fontFamily: 'monospace',
+    marginTop: 2,
+  },
+  scanItemPick: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.primary,
+  },
+  scanNote: {
+    fontSize: 11,
+    color: colors.textMuted,
   },
   infoCard: { backgroundColor: colors.surface, borderRadius: radius.lg, padding: spacing.md, shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 1 },
   infoCardHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 },
