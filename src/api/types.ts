@@ -114,6 +114,7 @@ export interface InitUploadPayload {
   metadata: {
     local_video_uid: string;
     device_id: string;
+    room_id?: string;
     camera_name?: string;
     session_id?: string;
     recorded_at?: string;

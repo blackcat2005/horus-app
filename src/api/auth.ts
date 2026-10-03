@@ -14,6 +14,8 @@ export interface LoginParams {
   deviceId: string;
   deviceType: 1 | 2 | 3 | 4;
   deviceName: string;
+  model?: string;
+  osVersion?: string;
 }
 
 const isPhone = (value: string): boolean => /^0\d{9}$/.test(value);
@@ -25,6 +27,8 @@ export async function login(params: LoginParams): Promise<AuthData> {
     device_type: params.deviceType,
     device_name: params.deviceName,
   };
+  if (params.model) body.model = params.model;
+  if (params.osVersion) body.os_version = params.osVersion;
   if (isPhone(params.identifier.trim())) {
     body.phone = params.identifier.trim();
   } else {

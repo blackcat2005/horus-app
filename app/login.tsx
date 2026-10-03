@@ -19,6 +19,7 @@ import {
   View,
 } from 'react-native';
 import Constants from 'expo-constants';
+import { getDeviceInfo } from '../src/services/deviceInfo';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -146,6 +147,7 @@ export default function LoginScreen() {
     try {
       await serverConfigService.save(host.trim(), port.trim());
       const deviceId = await getDeviceId();
+      const deviceInfo = getDeviceInfo();
       await login({
         identifier: identifier.trim(),
         password,
@@ -154,6 +156,8 @@ export default function LoginScreen() {
         deviceName:
           (Constants as any).deviceName ||
           `${Platform.OS === 'ios' ? 'iPhone' : 'Android'} của tôi`,
+        model: deviceInfo.model,
+        osVersion: deviceInfo.osVersion,
       });
       router.replace('/(tabs)');
     } catch (err: any) {

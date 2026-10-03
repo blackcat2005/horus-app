@@ -33,6 +33,7 @@ export interface VideoMetadata {
   /** UID ổn định của clip ở client — dùng để chống trùng lặp */
   localVideoUid: string;
   deviceId: string;
+  roomId?: string;
   cameraName?: string;
   sessionId?: string;
   recordedAt?: string;
@@ -203,6 +204,7 @@ class UploadService {
       metadata: {
         local_video_uid: metadata.localVideoUid,
         device_id: metadata.deviceId,
+        room_id: metadata.roomId,
         camera_name: metadata.cameraName,
         session_id: metadata.sessionId,
         recorded_at: metadata.recordedAt ?? new Date().toISOString(),

@@ -27,13 +27,65 @@ class StreamingService {
   private deviceId: string = '';
   private isStoppingRecording: boolean = false;
   private lastUploadedUri: string | null = null;
+  private currentRoomId: string | null = null;
+  private currentSessionId: string | null = null;
+  private recordingStartedAt: number | null = null;
+  private recordingDurationMs: number | null = null;
+  private deviceModel: string = '';
+  private cameraName: string = 'Remote Camera';
 
   /**
    * Khởi tạo streaming service
    */
-  public initialize(deviceId: string): void {
+  public initialize(
+    deviceId: string,
+    extra?: { deviceModel?: string; cameraName?: string; roomId?: string }
+  ): void {
     this.deviceId = deviceId;
-    logger.info('StreamingService initialized', { deviceId });
+    if (extra?.deviceModel) this.deviceModel = extra.deviceModel;
+    if (extra?.cameraName) this.cameraName = extra.cameraName;
+    if (extra?.roomId) this.currentRoomId = extra.roomId;
+    logger.info('StreamingService initialized', {
+      deviceId,
+      roomId: this.currentRoomId,
+      model: this.deviceModel,
+      cameraName: this.cameraName,
+    });
+  }
+
+  /**
+   * Gán room_id của phòng remote đang tham gia (để folder tên trên MinIO theo cấu trúc room_id/session_time)
+   */
+  public setActiveRoom(roomId: string | null): void {
+    this.currentRoomId = roomId;
+    logger.info('StreamingService active room updated', { roomId });
+  }
+
+  public getActiveRoom(): string | null {
+    return this.currentRoomId;
+  }
+
+  /**
+   * Gán session_id từ lệnh start_record của Controller (gọi khi nhận pending_commands).
+   * Session này sẽ được dùng để gom tất cả video của 1 lần "Start All" vào cùng 1 folder trên MinIO.
+   */
+  public setActiveSession(sessionId: string | null): void {
+    this.currentSessionId = sessionId;
+    logger.info('StreamingService active session updated', { sessionId });
+  }
+
+  /**
+   * Lấy session_id hiện tại (nếu có)
+   */
+  public getActiveSession(): string | null {
+    return this.currentSessionId;
+  }
+
+  /**
+   * Cập nhật camera name (vd "Camera sau" / "Cam-ABCD") — được dùng làm metadata khi upload
+   */
+  public setCameraName(name: string): void {
+    this.cameraName = name;
   }
 
   /**
@@ -145,14 +197,17 @@ class StreamingService {
     const started = await cameraService.startVideoRecording(maxDurationSec);
     if (started) {
       this.lastUploadedUri = null;
+      this.recordingStartedAt = Date.now();
+      this.recordingDurationMs = null;
       wsService.send({
         type: 'RECORD_START',
         device_id: this.deviceId,
         device_type: 'remote',
         timestamp: Date.now(),
         max_duration: maxDurationSec,
+        session_id: this.currentSessionId,
       });
-      logger.info('Video recording started', { maxDurationSec });
+      logger.info('Video recording started', { maxDurationSec, sessionId: this.currentSessionId });
     } else {
       logger.warn('startVideoRecording returned false', {
         maxDurationSec,
@@ -177,7 +232,12 @@ class StreamingService {
 
     this.isStoppingRecording = true;
     try {
-      return await cameraService.stopVideoRecording();
+      const uri = await cameraService.stopVideoRecording();
+      if (uri && this.recordingStartedAt) {
+        this.recordingDurationMs = Math.max(500, Date.now() - this.recordingStartedAt);
+        logger.info('Video recording stopped', { durationMs: this.recordingDurationMs });
+      }
+      return uri;
     } finally {
       this.isStoppingRecording = false;
     }
@@ -186,6 +246,7 @@ class StreamingService {
   /**
    * Upload file video lên server theo luồng chunked upload của API v1.
    * Chạy nền, không chặn UI.
+   * Session_id và device info được lấy từ state đã setActiveSession() khi nhận lệnh start_record.
    */
   public async uploadRecording(
     uri: string,
@@ -202,19 +263,35 @@ class StreamingService {
 
     this.lastUploadedUri = uri;
 
+    const effectiveSessionId = this.currentSessionId ?? 'standalone';
+    const recordedAt = this.recordingStartedAt
+      ? new Date(this.recordingStartedAt).toISOString()
+      : new Date().toISOString();
+    const fileName = uri.split('/').pop() || `recording_${Date.now()}.mp4`;
+    const localVideoUid = `${effectiveSessionId}_${this.deviceId}_${this.recordingStartedAt ?? Date.now()}`;
+
     try {
-      const fileName = uri.split('/').pop() || `recording_${Date.now()}.mp4`;
       await uploadService.uploadVideo(
         uri,
         {
-          localVideoUid: `${fileName}_${Date.now()}`,
+          localVideoUid,
           deviceId: this.deviceId,
-          cameraName: 'Remote Camera',
-          sessionId: 'standalone',
-          recordedAt: new Date().toISOString(),
+          roomId: this.currentRoomId ?? undefined,
+          cameraName: this.cameraName,
+          sessionId: effectiveSessionId,
+          recordedAt,
+          durationMs: this.recordingDurationMs ?? undefined,
+          resolution: undefined,
+          fps: undefined,
         },
         onProgress,
       );
+      logger.info('Video upload completed/queued', {
+        sessionId: effectiveSessionId,
+        roomId: this.currentRoomId,
+        deviceId: this.deviceId,
+        durationMs: this.recordingDurationMs,
+      });
       return true;
     } catch (error) {
       logger.error('Failed to upload recording', error);
@@ -226,7 +303,10 @@ class StreamingService {
         device_id: this.deviceId,
         device_type: 'remote',
         timestamp: Date.now(),
+        session_id: effectiveSessionId,
       });
+      this.recordingStartedAt = null;
+      this.recordingDurationMs = null;
     }
   }
 
@@ -283,6 +363,11 @@ class StreamingService {
     this.frameBuffer = [];
     this.frameRate = 5;
     this.quality = 0.8;
+    this.currentRoomId = null;
+    this.currentSessionId = null;
+    this.recordingStartedAt = null;
+    this.recordingDurationMs = null;
+    this.lastUploadedUri = null;
   }
 }
 

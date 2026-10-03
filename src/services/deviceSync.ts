@@ -7,6 +7,7 @@
 import { syncDevice, PendingCommand } from '../api/devices';
 import { logger } from '../utils/logger';
 import { authStore } from './authStore';
+import { getDeviceInfo } from './deviceInfo';
 
 export type DeviceCommandHandler = (cmd: PendingCommand) => Promise<void> | void;
 
@@ -138,7 +139,14 @@ class DeviceSyncService {
           const session = await authStore.load();
           if (session) {
             const { registerDevice } = await import('../api/devices');
-            await registerDevice({ device_id: this.deviceId, device_type: 1 as const, device_name: 'Remote Device' });
+            const info = getDeviceInfo();
+            await registerDevice({
+              device_id: this.deviceId,
+              device_type: 1 as const,
+              device_name: 'Remote Device',
+              model: info.model,
+              os_version: info.osVersion,
+            });
             logger.info('DeviceSync auto-re-register success', { deviceId: this.deviceId });
             nextIn = 2000;
           } else {

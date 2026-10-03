@@ -29,6 +29,7 @@ import { cameraService } from '../services/camera';
 import { streamingService } from '../services/streaming';
 import { localStore } from '../services/localStore';
 import { getDeviceId } from '../utils/device';
+import { getDeviceInfo } from '../services/deviceInfo';
 import { serverConfigService, ServerConfig, LanRoom } from '../services/serverConfig';
 import { fetchLanRooms } from '../services/discovery';
 import { colors, spacing, radius } from '../constants/theme';
@@ -254,6 +255,7 @@ export default function RemoteScreen() {
         dbg(`room_status in_room=${s.in_room} room_id=${s.room_id?.slice(0, 8) || 'null'}`);
       }
       setRoomIdForPreview(s.in_room ? s.room_id : null);
+      streamingService.setActiveRoom(s.in_room ? s.room_id : null);
       if (!s.in_room && isPreviewing) {
         dbg('leave room → disconnect mediasoup');
         mediasoupClientService.disconnect();
@@ -320,14 +322,42 @@ export default function RemoteScreen() {
       setRoomIdForPreview(null);
     });
     // Controller bấm "Ghi ALL" → mọi Remote online có grant_control nhận start_record → tự phát sóng
-    const offStart = deviceSyncService.onCommand('start_record', async () => {
-      dbg('Controller → BẮT ĐẦU GHI: tự bật Phát sóng');
+    //   + lưu session_id từ lệnh (để gom cùng folder trên MinIO khi upload)
+    const offStart = deviceSyncService.onCommand('start_record', async cmd => {
+      const sid = (cmd.payload as any)?.session_id as string | undefined;
+      const cfg = (cmd.payload as any)?.config as Record<string, unknown> | undefined;
+      if (sid) {
+        streamingService.setActiveSession(sid);
+        dbg(`Controller → BẮT ĐẦU GHI session=${sid.slice(0, 8)}: tự bật Phát sóng`);
+      } else {
+        streamingService.setActiveSession(null);
+        dbg('Controller → BẮT ĐẦU GHI (ko có session_id): tự bật Phát sóng');
+      }
+      // Nếu cấu hình yêu cầu record local (client side record & upload) → bấm luôn startRecording
+      if (cfg?.local_record === 1) {
+        void streamingService.startRecording();
+      }
       await startBroadcast();
     });
     // Controller bấm "Dừng ALL" → dừng phát, server auto-finalize MP4 cho từng Remote
-    const offStop = deviceSyncService.onCommand('stop_record', async () => {
-      dbg('Controller → DỪNG GHI: tự dừng Phát sóng (server lưu broadcast)');
+    //   + nếu có local recording đang chạy thì dừng + upload nó với session_id đã lưu
+    const offStop = deviceSyncService.onCommand('stop_record', async cmd => {
+      const sid = (cmd.payload as any)?.session_id as string | undefined;
+      dbg(
+        `Controller → DỪNG GHI session=${(sid || 'unknown').slice(0, 8)}: tự dừng Phát sóng (server lưu broadcast)`,
+      );
       await stopBroadcast();
+      // Nếu có video đang quay local thì dừng & upload nó theo session_id đã set trước đó
+      if (cameraService.isVideoRecording_?.()) {
+        const uri = await streamingService.stopRecording();
+        if (uri) {
+          streamingService.uploadRecording(uri, _p => {}).catch(e =>
+            logger.error('Local upload after stop_record failed', e),
+          );
+        }
+      }
+      // Xoá session sau khi đã gửi lệnh dừng & upload (đặt timeout để luồng upload kịp đọc state)
+      setTimeout(() => streamingService.setActiveSession(null), 15_000);
     });
     return () => {
       offApproved();
@@ -366,7 +396,11 @@ export default function RemoteScreen() {
     });
 
     // Khởi tạo services
-    streamingService.initialize(deviceId);
+    const info = getDeviceInfo();
+    streamingService.initialize(deviceId, {
+      deviceModel: info.model,
+      cameraName: 'Remote-' + deviceId.slice(0, 4),
+    });
     localStore.initialize();
 
     if (!ENABLE_SOCKET) {

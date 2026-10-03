@@ -4,6 +4,7 @@
  */
 
 import { logger } from '../utils/logger';
+import { getDeviceInfo } from './deviceInfo';
 import {
   Message,
   DeviceType,
@@ -117,6 +118,7 @@ class WebSocketService {
       device_id: this.deviceId,
       device_type: this.deviceType,
       device_name: this.deviceName,
+      device_model: getDeviceInfo().model,
       timestamp: Date.now(),
     };
 

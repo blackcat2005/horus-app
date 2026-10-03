@@ -51,9 +51,11 @@
       "package": "com.coder_vuitinh_2005.expocameratriggerapp"
     },
     "ios": {
+      "bundleIdentifier": "com.coder.vuitinh2005.expocameratriggerapp",
       "infoPlist": {
         "NSCameraUsageDescription": "Cho phép ứng dụng truy cập camera để preview mediasoup.",
-        "NSMicrophoneUsageDescription": "Cho phép ứng dụng truy cập micro để preview mediasoup."
+        "NSMicrophoneUsageDescription": "Cho phép ứng dụng truy cập micro để preview mediasoup.",
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "web": {
