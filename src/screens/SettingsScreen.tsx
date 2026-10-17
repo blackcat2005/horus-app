@@ -80,6 +80,8 @@ export default function SettingsScreen() {
     Alert.alert('Buộc đăng xuất', 'Xóa session local và quay về màn đăng nhập? (Dùng khi "Đăng xuất" không phản hồi do 9992)', [
       { text: 'Hủy', style:'cancel'},
       { text:'Xóa & đăng nhập lại', style:'destructive', onPress: async()=>{
+        // Rời phòng trên server trước (best-effort) → tránh member "xác" còn nằm lại.
+        try{ await logout(); }catch{}
         try{ await AsyncStorage.removeItem('auth_session'); }catch{}
         await authStore.clear();
         // Xoá deviceId cũ nếu bị kẹt "not owned by user" do DB reset — lần sau getDeviceId sẽ tạo mới

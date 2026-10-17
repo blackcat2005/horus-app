@@ -50,13 +50,41 @@ class MediasoupClientService {
   private audioProducer: any | null = null;
   private facingMode: 'user' | 'environment' = 'environment';
 
+  private producingInFlight: Promise<void> | null = null;
+
   public async startProducing(roomId: string): Promise<void> {
+    // Guard cấp service (singleton): chặn 2 lần produce chạy SONG SONG. Nếu chạy song
+    // song, dòng `this.device = new ms.Device()` của luồng sau sẽ ghi đè device đang
+    // load của luồng trước → createSendTransport ném "device not loaded". Guard ở đây
+    // bảo vệ bất kể UI gọi startProducing trùng thế nào.
+    if (this.producingInFlight) {
+      logger.warn('startProducing already in flight — await existing (chống produce trùng)');
+      return this.producingInFlight;
+    }
+    const p = this.startProducingInternal(roomId).finally(() => {
+      this.producingInFlight = null;
+    });
+    this.producingInFlight = p;
+    return p;
+  }
+
+  private async startProducingInternal(roomId: string): Promise<void> {
+    // Dọn cũ trước — phòng trường hợp lệnh start_record bắn 2 lần liên tiếp mà
+    // track trước chưa đóng: nếu còn sendTransport/producer cũ mà produce tiếp sẽ
+    // tạo 2 bộ producer cho cùng 1 camera → controller hiện nhiều preview + 1 cái đen
+    // (GUM thứ 2 tranh camera). Luôn bắt đầu sạch.
+    if (this.sendTransport || this.videoProducer || this.audioProducer) {
+      logger.warn('startProducing called while previous state alive — stopping old first');
+      this.stopProducing();
+    }
+
     const wrtc = await loadWebRTC();
     const ms = await loadMediasoup();
 
-    // 1) Nối signaling nếu chưa — dùng medium để 720p
+    // 1) Nối signaling nếu chưa — dùng medium để 720p. Kiểm luôn WS còn mở
+    // (state.connected có thể "true" nhưng socket đã chết → produce sẽ fail).
     const state = mediasoupService.getState();
-    if (!state.connected) {
+    if (!state.connected || !mediasoupService.isOpen()) {
       await mediasoupService.connect(roomId, { quality: 'medium', protocol: 'webrtc' });
     }
     const rtpCaps = mediasoupService.getState().rtpCapabilities as unknown as any;
@@ -229,7 +257,7 @@ class MediasoupClientService {
     await loadWebRTC();
 
     const state = mediasoupService.getState();
-    if (!state.connected) {
+    if (!state.connected || !mediasoupService.isOpen()) {
       await mediasoupService.connect(roomId, { quality: 'low', protocol: 'webrtc' });
     }
     const rtpCaps = mediasoupService.getState().rtpCapabilities as unknown as any;

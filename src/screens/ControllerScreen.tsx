@@ -415,7 +415,7 @@ export default function ControllerScreen() {
                       const r = await joinRoom({
                         invite_code: code,
                         device_id: deviceId,
-                        camera_name: 'Controller-' + deviceId.slice(0, 4),
+                        camera_name: 'Controller-' + deviceId.slice(-4),
                         grant_control: true,
                       });
                       setRoomId(r.room_id);

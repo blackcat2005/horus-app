@@ -76,6 +76,13 @@ export default function RemoteScreen() {
         .catch(() => {});
     }
   }, [isPreviewing, RTCViewComp]);
+  // Cho preview local một nhịp re-mount: RTCView (react-native-webrtc) lúc start đôi
+  // khi ra frame đầu muộn/đen — remount 1 lần ngắn sau khi có stream thường khơi lại được.
+  useEffect(() => {
+    if (!isPreviewing || !localWrtcStream) return;
+    const t = setTimeout(() => setRtcKey(k => k + 1), 800);
+    return () => clearTimeout(t);
+  }, [isPreviewing, localWrtcStream]);
   const dbgScrollRef = useRef<ScrollView>(null);
   const dbg = useCallback((m: string) => {
     const line = `${new Date().toLocaleTimeString()} ${m}`;
@@ -128,7 +135,7 @@ export default function RemoteScreen() {
         const r = await joinRoom({
           invite_code: lanRoom.invite_code,
           device_id: deviceId,
-          camera_name: 'Remote-' + deviceId.slice(0, 4),
+          camera_name: 'Remote-' + deviceId.slice(-4),
           grant_control: true,
         });
         setRoomIdForPreview(r.room_id);
@@ -156,7 +163,7 @@ export default function RemoteScreen() {
         const r = await joinRoom({
           invite_code: code,
           device_id: deviceId,
-          camera_name: 'Remote-' + deviceId.slice(0, 4),
+          camera_name: 'Remote-' + deviceId.slice(-4),
           grant_control: true,
         });
         await serverConfigService.saveLanRoom({
@@ -268,6 +275,7 @@ export default function RemoteScreen() {
   }, [isPreviewing, dbg]);
 
   // Bật phát sóng (produce) — như nút "Phát sóng", dùng cho cả click lẫn lệnh từ Controller
+  const startingRef = useRef(false);
   const startBroadcast = useCallback(async () => {
     if (isPreviewing) {
       dbg('Đã đang phát sóng rồi — bỏ qua');
@@ -277,7 +285,20 @@ export default function RemoteScreen() {
       dbg('startBroadcast: chưa ở trong phòng, bỏ qua');
       return;
     }
+    // Chặn kích hoạt trùng (Controller bấm "Ghi ALL" 2 lần trong cùng 1 nhịp → 2 lệnh
+    // start_record về sát nhau). state isPreviewing chưa kịp cập nhật trong cùng tick,
+    // nên dùng ref để loại bỏ gọi trùng — tránh create 2 bộ producer (nhiều preview +
+    // preview đen trên controller).
+    if (startingRef.current) return;
+    startingRef.current = true;
+    // Bật trạng thái NGAY → CameraView (expo-camera) bị unmount để WebRTC chiếm
+    // camera độc quyền. Nếu để CameraView còn mở mà lao vào getUserMedia, 2 consumer
+    // tranh cùng 1 camera → preview trên phone không mở được ("Đang mở camera WebRTC..."
+    // treo mãi) — đúng lúc Controller bật preview/Ghi ALL. Chờ 1 nhịp cho React commit
+    // + expo-camera nhả camera, rồi mới getUserMedia.
+    setIsPreviewing(true);
     try {
+      await new Promise(r => setTimeout(r, 400));
       dbg('startProducing begin (Controller kích hoạt)');
       await mediasoupClientService.startProducing(roomIdForPreview);
       const s = mediasoupClientService.getLocalStream();
@@ -287,12 +308,14 @@ export default function RemoteScreen() {
       activateKeepAwake('broadcast');
       const vt = s?.getVideoTracks?.()[0];
       dbg(`local video enabled=${vt?.enabled} readyState=${vt?.readyState}`);
-      setIsPreviewing(true);
       dbg('Producing done isPreviewing=true');
     } catch (e) {
+      setIsPreviewing(false);
       const msg = String(e instanceof Error ? e.message : e);
       dbg('Producing failed: ' + msg);
       Alert.alert('Preview lỗi', msg);
+    } finally {
+      startingRef.current = false;
     }
   }, [isPreviewing, roomIdForPreview, dbg]);
 
@@ -399,7 +422,7 @@ export default function RemoteScreen() {
     const info = getDeviceInfo();
     streamingService.initialize(deviceId, {
       deviceModel: info.model,
-      cameraName: 'Remote-' + deviceId.slice(0, 4),
+      cameraName: 'Remote-' + deviceId.slice(-4),
     });
     localStore.initialize();
 

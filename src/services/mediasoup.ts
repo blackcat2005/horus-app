@@ -231,6 +231,11 @@ class MediasoupService {
     return this.sendRequest({ type: 'get-producers' });
   }
 
+  /** WS còn mở thật không (state.connected có thể cũ nếu socket đã chết ngầm). */
+  public isOpen(): boolean {
+    return this.ws !== null && this.ws.readyState === 1;
+  }
+
   public disconnect(): void {
     if (this.ws) {
       try {
