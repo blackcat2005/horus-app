@@ -6,6 +6,15 @@
  */
 import { logger } from '../utils/logger';
 import { mediasoupService } from './mediasoup';
+import {
+  PROBE_ENCODINGS,
+  applyProbeSenderParams,
+  attachProbe,
+  isProbeActive,
+  probeVideoConstraints,
+  startProbe,
+  stopProbe,
+} from './recorderProbe';
 
 // Lazy import để web (không có react-native-webrtc) vẫn tsc được
 let webrtc: any | null = null;
@@ -106,7 +115,10 @@ class MediasoupClientService {
         wrtc.mediaDevices as unknown as { getUserMedia: (c: unknown) => Promise<any> }
       ).getUserMedia({
         audio: audioConstraints,
-        video: { facingMode: this.facingMode, width: 1280, height: 720, frameRate: 30 },
+        // M0 experiment: 1080p30 capture when the recorder probe is on
+        video: isProbeActive()
+          ? probeVideoConstraints(this.facingMode)
+          : { facingMode: this.facingMode, width: 1280, height: 720, frameRate: 30 },
       });
     } catch (e) {
       logger.warn(`getUserMedia ${this.facingMode} 720p failed, retry 640p`, e);
@@ -194,7 +206,17 @@ class MediasoupClientService {
         ? { enabled: audioTrack.enabled, readyState: (audioTrack as any).readyState }
         : null,
     });
-    if (videoTrack) this.videoProducer = await this.sendTransport.produce({ track: videoTrack });
+    if (videoTrack && isProbeActive()) {
+      // M0 experiment: tap frames, low-bitrate preview sender
+      startProbe(videoTrack, () => this.videoProducer);
+      this.videoProducer = await this.sendTransport.produce({
+        track: videoTrack,
+        encodings: PROBE_ENCODINGS,
+      });
+      await applyProbeSenderParams(this.videoProducer);
+    } else if (videoTrack) {
+      this.videoProducer = await this.sendTransport.produce({ track: videoTrack });
+    }
     if (audioTrack) this.audioProducer = await this.sendTransport.produce({ track: audioTrack });
     logger.info('Producing done', { facingMode: this.facingMode });
     // poll connectionstate after 2s
@@ -228,6 +250,7 @@ class MediasoupClientService {
     // replace in localStream
     this.localStream.removeTrack(oldTrack);
     this.localStream.addTrack(newTrack);
+    attachProbe(newTrack);
     logger.info('switchCamera done ' + this.facingMode);
     return this.facingMode;
   }
@@ -236,6 +259,11 @@ class MediasoupClientService {
   }
 
   public stopProducing(): void {
+    try {
+      stopProbe();
+    } catch (e) {
+      logger.warn('[probe] stop failed', e);
+    }
     try {
       this.localStream?.getTracks().forEach((t: any) => t.stop());
     } catch {}
