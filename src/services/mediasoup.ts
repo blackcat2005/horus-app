@@ -7,7 +7,7 @@
  */
 import { logger } from '../utils/logger';
 import { authStore } from './authStore';
-import { serverConfigService } from './serverConfig';
+import { serverConfigService, wsUrl } from './serverConfig';
 import { getPreviewToken } from '../api/rooms';
 
 export type MediaRole = 'controller' | 'remote';
@@ -61,34 +61,22 @@ class MediasoupService {
 
     const preview = await getPreviewToken(roomId, opts);
     this.previewToken = preview.preview_token;
-    logger.info('Preview token obtained', { roomId, token: preview.preview_token.slice(0, 8) });
+    logger.info('Preview token obtained', { roomId });
 
     const config = await serverConfigService.load();
-    // signaling_url là "/it4788/api/v1/rooms/:id/media" — ghép thành ws(s)://host:port + path
-    const httpUrl = serverConfigService.httpUrl(config);
-    const wsBase = httpUrl.replace(/^http/, 'ws');
-    const signalingUrl = `${wsBase}${preview.signaling_url}`;
+    // signaling_url là "/it4788/api/v1/rooms/:id/media" — ghép thành ws(s)://host + path
+    const signalingUrl = `${wsUrl(config)}${preview.signaling_url}`;
 
     const session = await authStore.load();
     if (!session?.accessToken) throw new Error('No access token for mediasoup WS');
 
-    // React Native WebSocket không hỗ trợ custom header trực tiếp → dùng query hoặc subprotocol.
-    // Thử header cho web; fallback thêm token vào URL nếu server hỗ trợ.
-    const urlWithAuth = `${signalingUrl}?token=${encodeURIComponent(session.accessToken)}`;
+    logger.info('Connecting mediasoup WS', { signalingUrl });
 
-    logger.info('Connecting mediasoup WS', { signalingUrl, wsUrl: urlWithAuth });
-
-    // @ts-ignore — RN WebSocket ctor có thể nhận headers ở một số polyfill
-    this.ws = new WebSocket(urlWithAuth, undefined, {
+    // Server chỉ đọc Authorization từ handshake; RN WebSocket nhận headers qua tham số thứ 3
+    // @ts-ignore — kiểu DOM WebSocket không có tham số options
+    this.ws = new WebSocket(signalingUrl, undefined, {
       headers: { Authorization: `Bearer ${session.accessToken}` },
     } as unknown as string[]);
-
-    // Gắn thêm header cho môi trường hỗ trợ (web)
-    // Nhiều server Fastify @fastify/websocket đọc Authorization từ handshake headers
-    try {
-      // @ts-ignore — thử gửi auth qua extension header nếu được
-      if (this.ws && 'headers' in this.ws) logger.debug('WS headers set');
-    } catch {}
 
     this.ws.onopen = () => {
       logger.info('Mediasoup WS open');
@@ -100,7 +88,7 @@ class MediasoupService {
       try {
         const msg = JSON.parse(event.data) as Record<string, unknown>;
         const type = String(msg.type ?? 'unknown');
-        logger.debug('Mediasoup WS message', { type, msg });
+        logger.debug('Mediasoup WS message', { type });
         // resolve pending request nếu có request_id
         const reqId = msg.request_id as string | undefined;
         if (reqId && this.pending.has(reqId)) {
@@ -171,7 +159,7 @@ class MediasoupService {
     const reqId = `req_${++this.reqId}`;
     const withId = { request_id: reqId, ...payload };
     this.ws.send(JSON.stringify(withId));
-    logger.debug('Mediasoup WS send', withId);
+    logger.debug('Mediasoup WS send', { type: payload.type, request_id: reqId });
     return reqId;
   }
 

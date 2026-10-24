@@ -107,7 +107,6 @@ export default function ControllerScreen() {
   const [joinCode, setJoinCode] = useState('');
   const [joinLog, setJoinLog] = useState<string[]>([]);
   const [autoApprove, setAutoApprove] = useState<0 | 1>(1);
-  const [openForJoin, setOpenForJoin] = useState<0 | 1>(1);
   const [myRooms, setMyRooms] = useState<MyRoom[] | null>(null);
   const previewCleanupRef = useRef<(() => void) | null>(null);
   const autoCreateRef = useRef(false);
@@ -138,8 +137,8 @@ export default function ControllerScreen() {
   // Controller tự TẠO phòng riêng + join luôn khi mở app (chỉ 1 lần): vì các
   // route approve/kick/sync chỉ cho phép OWNER (requireOwnerRoom), controller
   // join phòng của user khác (vd phòng chung của default-room@) sẽ bị 401 →
-  // "không join quản lý được". Tự tạo phòng (mở trên LAN, tự duyệt) để controller
-  // là owner: remote quét LAN thấy phòng, tap là vào ngay.
+  // "không join quản lý được". Tự tạo phòng (tự duyệt) để controller
+  // là owner: remote nhập mã mời là vào ngay.
   useEffect(() => {
     if (roomId || !deviceId || session?.accountRole !== 'controller' || autoCreateRef.current) {
       return;
@@ -148,7 +147,7 @@ export default function ControllerScreen() {
     (async () => {
       try {
         logger.info('Auto-create phòng cho controller', { deviceId });
-        const r = await createRoom({ max_members: 16, auto_approve: 1, open_for_join: 1 });
+        const r = await createRoom({ max_members: 16, auto_approve: 1 });
         setRoomId(r.room_id);
         setInvite(r.invite_code);
         setInviteExpires(r.expires_at ?? null);
@@ -176,7 +175,6 @@ export default function ControllerScreen() {
       const r = await createRoom({
         max_members: 16,
         auto_approve: autoApprove,
-        open_for_join: openForJoin,
       });
       setRoomId(r.room_id);
       setInvite(r.invite_code);
@@ -204,7 +202,7 @@ export default function ControllerScreen() {
     } finally {
       setLoading(false);
     }
-  }, [deviceId, autoApprove, openForJoin, loadMyRooms]);
+  }, [deviceId, autoApprove, loadMyRooms]);
 
   const handleRefreshCode = useCallback(async () => {
     if (!roomId) return;
@@ -341,49 +339,6 @@ export default function ControllerScreen() {
                   </Text>
                 </TouchableOpacity>
               </View>
-            </View>
-            <View style={styles.card}>
-              <Text style={styles.cardTitle}>Hiển thị trên LAN</Text>
-              <View style={styles.row}>
-                <TouchableOpacity
-                  style={[
-                    styles.segBtn,
-                    {
-                      flex: 1,
-                      backgroundColor: openForJoin === 0 ? colors.primary : colors.background,
-                    },
-                  ]}
-                  onPress={() => setOpenForJoin(0)}>
-                  <Text
-                    style={[
-                      styles.segText,
-                      { color: openForJoin === 0 ? colors.white : colors.textSecondary },
-                    ]}>
-                    🔒 Chỉ dùng mã mời
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[
-                    styles.segBtn,
-                    {
-                      flex: 1,
-                      backgroundColor: openForJoin === 1 ? colors.primary : colors.background,
-                    },
-                  ]}
-                  onPress={() => setOpenForJoin(1)}>
-                  <Text
-                    style={[
-                      styles.segText,
-                      { color: openForJoin === 1 ? colors.white : colors.textSecondary },
-                    ]}>
-                    📡 Mở trên LAN
-                  </Text>
-                </TouchableOpacity>
-              </View>
-              <Text style={styles.muted}>
-                Mở trên LAN: mọi phone cùng Wi-Fi nhìn thấy phòng trong màn đăng nhập, tap là join —
-                không cần gõ mã mời.
-              </Text>
             </View>
             <TouchableOpacity style={styles.primaryBtn} onPress={handleCreate} disabled={loading}>
               {loading ? (
@@ -676,8 +631,7 @@ export default function ControllerScreen() {
                           {isCurrent ? '  👈 đang dùng' : ''}
                         </Text>
                         <Text style={styles.muted}>
-                          {r.invite_code} · {r.member_count}/{r.max_members} thành viên ·{' '}
-                          {r.open_for_join ? 'mở trên LAN' : 'chỉ mã mời'} · {r.status}
+                          {r.invite_code} · {r.member_count}/{r.max_members} thành viên · {r.status}
                         </Text>
                       </View>
                       {!isCurrent && (
