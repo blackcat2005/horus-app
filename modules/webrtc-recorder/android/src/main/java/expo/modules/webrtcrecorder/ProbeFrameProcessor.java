@@ -7,13 +7,19 @@ import org.webrtc.SurfaceTextureHelper;
 import org.webrtc.VideoFrame;
 
 import java.lang.reflect.Field;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * M0 probe tap: measures every frame react-native-webrtc hands to the processor chain and returns
- * it unchanged. Enabled on a track from JS with track._setVideoEffects([PROCESSOR_NAME]).
+ * Frame processor registered under {@link #PROCESSOR_NAME}. Measures every frame in
+ * {@link FrameStats}, forwards it to the active {@link Mp4TrackRecorder} if recording, and returns
+ * the frame unchanged to WebRTC. Enabled on a local track from JS with
+ * {@code track._setVideoEffects([PROCESSOR_NAME])}.
  */
 final class ProbeFrameProcessor implements VideoFrameProcessor {
     static final String PROCESSOR_NAME = "webrtcRecorderProbe";
+
+    private static final AtomicReference<Mp4TrackRecorder> ACTIVE_RECORDER =
+            new AtomicReference<>(null);
 
     private final FrameStats stats;
 
@@ -21,9 +27,21 @@ final class ProbeFrameProcessor implements VideoFrameProcessor {
         this.stats = stats;
     }
 
+    static void setActiveRecorder(Mp4TrackRecorder recorder) {
+        ACTIVE_RECORDER.set(recorder);
+    }
+
+    static Mp4TrackRecorder getActiveRecorder() {
+        return ACTIVE_RECORDER.get();
+    }
+
     @Override
     public VideoFrame process(VideoFrame frame, SurfaceTextureHelper textureHelper) {
         stats.onFrame(frame);
+        Mp4TrackRecorder rec = ACTIVE_RECORDER.get();
+        if (rec != null) {
+            rec.onVideoFrame(frame);
+        }
         // The caller releases the returned frame and the input separately, so hand back our own ref.
         frame.retain();
         return frame;

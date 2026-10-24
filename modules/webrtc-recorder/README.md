@@ -1,26 +1,32 @@
 # webrtc-recorder (Android, local Expo module)
 
-Records the react-native-webrtc camera track to MP4 from raw capture frames while the same
-track feeds the mediasoup preview. Plan: `docs/android-recorder-module-plan.md`.
+Records the `react-native-webrtc` camera + mic capture to a full-quality local MP4 from raw capture
+frames while the same `getUserMedia` stream feeds the mediasoup live preview at low bitrate.
+Plan: `docs/android-recorder-module-plan.md`.
 
-Status: **M0 experiment only.** The module registers a probe frame processor
-(`webrtcRecorderProbe`) and reports what it receives. No recording yet.
+## Architecture (M0–M4)
 
-## M0 runbook (needs a real Android phone + a new dev-client build)
-
-1. `npm install` (postinstall applies `patches/react-native-webrtc+124.0.8.patch`), then build
-   the dev client (native code changed).
-2. Set `RECORDER_PROBE_VARIANT` in `src/constants/recorderProbe.ts`, reload JS (`r` in Metro).
-3. Join a room on the Remote phone, start the preview, open it on the Controller, throttle the
-   phone's network.
-4. Read logs once per second (Metro or `adb logcat -s ReactNativeJS WebrtcRecorder`):
-   `[probe] tap 1920x1080 rot=90 fps=30 maxGap=40ms raw=false | send 480x270@30 140kbps qlr=bandwidth`
-   - `tap` = what the frame processor receives (buffer size is sensor orientation, so
-     1920x1080 even in portrait).
-   - `send` = what WebRTC actually encodes (`qlr` = qualityLimitationReason).
-5. Stop the preview after 5 min: `[probe] summary {...}` shows avg fps, max gap and
-   `framesPerResolution`.
-
-Variants: `as-is`, `patched`, `maintain-resolution`, `patched+maintain-resolution`, `off`.
-
-Gate: tap steady ~1920x1080 @ ~30 fps for 5 min while the Controller preview keeps working.
+1. **Raw video frame tap (`ProbeFrameProcessor.java` + `patches/react-native-webrtc+124.0.8.patch`)**:
+   Registers `webrtcRecorderProbe` in `ProcessorProvider`. When `VideoEffectProcessor.processRawFrames`
+   is enabled, the processor receives the unadapted camera `VideoFrame` before WebRTC's
+   `FrameAdaptationParameters` downscale/drop is applied for the preview sender.
+2. **Surface H.264 encoder (`Mp4TrackRecorder.java`)**:
+   Renders each `VideoFrame` into a `MediaCodec` (`video/avc`) input `Surface` on a dedicated
+   `HandlerThread` using `EglBase.create(EglUtils.getRootEglBaseContext(), EglBase.CONFIG_RECORDABLE)`
+   + `VideoFrameDrawer` + `GlRectDrawer`. Never blocks the camera capture thread (drops & counts
+   frames if the encoder lags). Applies `VideoFrame.getRotation()` via `MediaMuxer.setOrientationHint`.
+3. **Audio tap + AAC encoder (`WebrtcRecorderPackage.java`, `WebrtcRecorderLifecycleListener.java`, `AudioSampleDispatcher.java`)**:
+   Installs `JavaAudioDeviceModule.builder(ctx).setSamplesReadyCallback(...)` on
+   `WebRTCModuleOptions.getInstance().audioDeviceModule` during `Application.onCreate` (before
+   `WebRTCModule` is instantiated). Encodes 16-bit PCM to AAC-LC (`audio/mp4a-latm`) anchored to the
+   same monotonic clock origin as video (`RecorderTiming.java`).
+4. **Rolling segments + lossless stitcher + crash recovery (`SegmentStitcher.java`)**:
+   Writes rolling `segment_NNNN.mp4` files (default 20 s) so an app kill loses at most the active
+   tail. On `stop()`, losslessly remuxes all finalized segments via `MediaExtractor` + `MediaMuxer`
+   into a single MP4. Leftover `rec_*` folders from a crash are stitched into `recovered_*.mp4` on
+   next launch (`recoverOrphanedRecordings`).
+5. **RemoteScreen & StreamingService integration (M4)**:
+   Controlled by `USE_WEBRTC_RECORDER_ON_ANDROID` in `src/constants/config.ts` (default `true`).
+   Captures 1080p30, produces preview at ~300 kbps (`scaleResolutionDownBy: 2`), records full
+   1080p30 @ 6 Mbps without stopping the live preview, and uploads via `streamingService.uploadRecording`.
+   Set `USE_WEBRTC_RECORDER_ON_ANDROID = false` to fall back to the `expo-camera` path.
