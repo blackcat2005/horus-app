@@ -253,11 +253,25 @@ export default function RemoteScreen() {
     setIsFullscreenPreview(false);
   }, [dbg]);
 
-  // interim: expo-camera recordAsync và WebRTC getUserMedia không dùng chung camera được
-  // (preview unmount CameraView). Tới khi device spike quyết định: GHI THẮNG PREVIEW — dừng
-  // preview + mount lại CameraView để quay, phát lại preview sau khi đã bắt đầu upload.
+  // M4: Trên Android có module webrtc-recorder (bật qua USE_WEBRTC_RECORDER_ON_ANDROID), ghi MP4
+  // full-quality trực tiếp từ raw frames của track WebRTC đang phát preview — preview giữ nguyên
+  // suốt lúc quay. Nhánh fallback expo-camera (dừng preview để quay) được giữ lại phía dưới cho
+  // iOS hoặc khi tắt cờ USE_WEBRTC_RECORDER_ON_ANDROID.
+  // shortcut: CameraView unmount workaround khi bật preview vẫn giữ lại để nhánh fallback hoạt động.
   const resumePreviewRef = useRef(false);
   const startLocalRecording = useCallback(async () => {
+    if (streamingService.canUseWebrtcTrackRecorder()) {
+      if (!isPreviewing && roomIdForPreview && !joinPending) {
+        await startBroadcast();
+      }
+      if (mediasoupClientService.getLocalVideoTrack()) {
+        const ok = await streamingService.startWebrtcTrackRecording();
+        setIsRecording(ok);
+        dbg(ok ? 'Đang quay từ WebRTC track (preview giữ nguyên)' : 'Không bắt đầu quay WebRTC track được');
+        return;
+      }
+      dbg('Chưa có track WebRTC — chuyển sang fallback expo-camera');
+    }
     resumePreviewRef.current = isPreviewing;
     if (isPreviewing) await stopBroadcast();
     // Chờ CameraView mount lại và bắn onCameraReady (tối đa ~5s)
@@ -267,9 +281,21 @@ export default function RemoteScreen() {
     const ok = await streamingService.startRecording();
     setIsRecording(ok);
     dbg(ok ? 'Đang quay local' : 'Không bắt đầu quay local được');
-  }, [isPreviewing, stopBroadcast, dbg]);
+  }, [isPreviewing, roomIdForPreview, joinPending, startBroadcast, stopBroadcast, dbg]);
 
   const stopLocalRecording = useCallback(async () => {
+    if (streamingService.isWebrtcTrackRecording()) {
+      const uri = await streamingService.stopWebrtcTrackRecording();
+      setIsRecording(false);
+      if (uri) {
+        setUploadPercent(0);
+        streamingService.uploadRecording(uri, setUploadPercent).then(ok => {
+          dbg(ok ? 'Upload xong' : 'Upload lỗi — clip vẫn nằm ở tab Files');
+          setUploadPercent(null);
+        });
+      }
+      return;
+    }
     if (cameraService.isVideoRecording_()) {
       const uri = await streamingService.stopRecording();
       setIsRecording(false);
@@ -360,7 +386,11 @@ export default function RemoteScreen() {
       cameraName: 'Remote-' + deviceId.slice(-4),
     });
     localStore.initialize();
-  }, [deviceId]);
+    // M3 crash recovery: ghép các segment dở dang của lần chạy trước (nếu có) vào tab Files
+    void streamingService.recoverCrashedRecordings().then(n => {
+      if (n > 0) dbg(`Đã khôi phục ${n} video ghi dở từ phiên trước (tab Files)`);
+    });
+  }, [deviceId, dbg]);
 
   /**
    * Xử lý chụp ảnh + lưu local (không upload lên server)
@@ -525,8 +555,14 @@ export default function RemoteScreen() {
                     paddingHorizontal: 10,
                     paddingVertical: 6,
                     borderRadius: 8,
+                    opacity: isRecording ? 0.45 : 1,
                   }}
                   onPress={async () => {
+                    // shortcut: Chặn đổi cam khi đang ghi để không đổi kích thước/orientation giữa các segment
+                    if (isRecording) {
+                      Alert.alert('Đang quay', 'Không thể đổi camera trong khi đang ghi hình.');
+                      return;
+                    }
                     try {
                       const m = await mediasoupClientService.switchCamera();
                       const s = mediasoupClientService.getLocalStream();
@@ -547,7 +583,11 @@ export default function RemoteScreen() {
           )}
           {isRecording && (
             <View style={[styles.alertBox, styles.alertRecording]}>
-              <Text style={styles.alertTitle}>⏺ Đang quay — preview tạm dừng</Text>
+              <Text style={styles.alertTitle}>
+                {isPreviewing
+                  ? '⏺ Đang quay (1080p) — preview vẫn đang phát'
+                  : '⏺ Đang quay — preview tạm dừng'}
+              </Text>
             </View>
           )}
           {uploadPercent !== null && (

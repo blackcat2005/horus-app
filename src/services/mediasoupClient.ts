@@ -4,6 +4,16 @@
  * Remote: getUserMedia → sendTransport → produce
  * Controller: recvTransport → consume → RTCView stream → resume
  */
+import { Platform } from 'react-native';
+import {
+  USE_WEBRTC_RECORDER_ON_ANDROID,
+  WEBRTC_PREVIEW_MAX_BITRATE,
+  WEBRTC_PREVIEW_SCALE_DOWN_BY,
+  WEBRTC_RECORDER_FPS,
+  WEBRTC_RECORDER_VIDEO_HEIGHT,
+  WEBRTC_RECORDER_VIDEO_WIDTH,
+} from '../constants/config';
+import { WebrtcRecorder } from '../../modules/webrtc-recorder';
 import { logger } from '../utils/logger';
 import { mediasoupService } from './mediasoup';
 import {
@@ -15,6 +25,9 @@ import {
   startProbe,
   stopProbe,
 } from './recorderProbe';
+
+const useAndroidRecorderCapture = () =>
+  Platform.OS === 'android' && USE_WEBRTC_RECORDER_ON_ANDROID && WebrtcRecorder != null;
 
 // Lazy import để web (không có react-native-webrtc) vẫn tsc được
 let webrtc: any | null = null;
@@ -110,27 +123,34 @@ class MediasoupClientService {
       noiseSuppression: true,
       autoGainControl: true,
     };
+    const want1080p = isProbeActive() || useAndroidRecorderCapture();
     try {
       this.localStream = await (
         wrtc.mediaDevices as unknown as { getUserMedia: (c: unknown) => Promise<any> }
       ).getUserMedia({
         audio: audioConstraints,
-        // M0 experiment: 1080p30 capture when the recorder probe is on
         video: isProbeActive()
           ? probeVideoConstraints(this.facingMode)
-          : { facingMode: this.facingMode, width: 1280, height: 720, frameRate: 30 },
+          : want1080p
+            ? {
+                facingMode: this.facingMode,
+                width: WEBRTC_RECORDER_VIDEO_WIDTH,
+                height: WEBRTC_RECORDER_VIDEO_HEIGHT,
+                frameRate: WEBRTC_RECORDER_FPS,
+              }
+            : { facingMode: this.facingMode, width: 1280, height: 720, frameRate: 30 },
       });
     } catch (e) {
-      logger.warn(`getUserMedia ${this.facingMode} 720p failed, retry 640p`, e);
+      logger.warn(`getUserMedia ${this.facingMode} primary failed, retry 720p/640p`, e);
       try {
         this.localStream = await (
           wrtc.mediaDevices as unknown as { getUserMedia: (c: unknown) => Promise<any> }
         ).getUserMedia({
           audio: audioConstraints,
-          video: { facingMode: this.facingMode, width: 640, height: 480, frameRate: 30 },
+          video: { facingMode: this.facingMode, width: 1280, height: 720, frameRate: 30 },
         });
       } catch (e2) {
-        logger.warn(`getUserMedia ${this.facingMode} failed, retry fallback`, e2);
+        logger.warn(`getUserMedia ${this.facingMode} 720p failed, retry fallback`, e2);
         this.localStream = await (
           wrtc.mediaDevices as unknown as { getUserMedia: (c: unknown) => Promise<any> }
         ).getUserMedia({
@@ -214,6 +234,18 @@ class MediasoupClientService {
         encodings: PROBE_ENCODINGS,
       });
       await applyProbeSenderParams(this.videoProducer);
+    } else if (videoTrack && useAndroidRecorderCapture()) {
+      // M4: attach raw-frame recorder tap on the 1080p30 track, produce low-bitrate preview
+      this.attachRecorderTap(videoTrack);
+      this.videoProducer = await this.sendTransport.produce({
+        track: videoTrack,
+        encodings: [
+          {
+            maxBitrate: WEBRTC_PREVIEW_MAX_BITRATE,
+            scaleResolutionDownBy: WEBRTC_PREVIEW_SCALE_DOWN_BY,
+          },
+        ],
+      });
     } else if (videoTrack) {
       this.videoProducer = await this.sendTransport.produce({ track: videoTrack });
     }
@@ -237,7 +269,14 @@ class MediasoupClientService {
     const newStream = await (
       wrtc.mediaDevices as unknown as { getUserMedia: (c: unknown) => Promise<any> }
     ).getUserMedia({
-      video: { facingMode: this.facingMode, width: 640, height: 480, frameRate: 15 },
+      video: useAndroidRecorderCapture()
+        ? {
+            facingMode: this.facingMode,
+            width: WEBRTC_RECORDER_VIDEO_WIDTH,
+            height: WEBRTC_RECORDER_VIDEO_HEIGHT,
+            frameRate: WEBRTC_RECORDER_FPS,
+          }
+        : { facingMode: this.facingMode, width: 640, height: 480, frameRate: 15 },
       audio: false,
     });
     const newTrack = newStream.getVideoTracks()[0];
@@ -251,6 +290,9 @@ class MediasoupClientService {
     this.localStream.removeTrack(oldTrack);
     this.localStream.addTrack(newTrack);
     attachProbe(newTrack);
+    if (useAndroidRecorderCapture()) {
+      this.attachRecorderTap(newTrack);
+    }
     logger.info('switchCamera done ' + this.facingMode);
     return this.facingMode;
   }
@@ -402,6 +444,22 @@ class MediasoupClientService {
     } catch (e) {
       logger.error('consumeOne failed', e);
     }
+  }
+
+  public attachRecorderTap(videoTrack?: any): void {
+    const track = videoTrack ?? this.localStream?.getVideoTracks?.()[0];
+    if (!track || !WebrtcRecorder) return;
+    try {
+      WebrtcRecorder.setRawFrameMode(true);
+      const procName = WebrtcRecorder.getProcessorName();
+      (track as { _setVideoEffects?: (names: string[]) => void })._setVideoEffects?.([procName]);
+    } catch (e) {
+      logger.warn('attachRecorderTap failed', e);
+    }
+  }
+
+  public getLocalVideoTrack(): any | null {
+    return this.localStream?.getVideoTracks?.()[0] ?? null;
   }
 
   public getLocalStream(): any | null {

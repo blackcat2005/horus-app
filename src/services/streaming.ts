@@ -4,12 +4,33 @@
  * Giữ room/session hiện tại để gắn metadata khi upload, và telemetry recording/upload cho sync_device.
  */
 
+import * as FileSystem from 'expo-file-system/legacy';
+import { Platform } from 'react-native';
+import {
+  WebrtcRecorder,
+  recoverOrphanedRecordings,
+  start as startWebrtcRecorder,
+  stop as stopWebrtcRecorder,
+} from '../../modules/webrtc-recorder';
+import {
+  CAMERA_VIDEO_MAX_DURATION,
+  USE_WEBRTC_RECORDER_ON_ANDROID,
+  WEBRTC_RECORDER_AUDIO_BITRATE,
+  WEBRTC_RECORDER_FPS,
+  WEBRTC_RECORDER_SEGMENT_SECONDS,
+  WEBRTC_RECORDER_VIDEO_BITRATE,
+  WEBRTC_RECORDER_VIDEO_HEIGHT,
+  WEBRTC_RECORDER_VIDEO_WIDTH,
+} from '../constants/config';
+import { deleteFile } from '../utils/file';
 import { logger } from '../utils/logger';
 import { cameraService } from './camera';
-import { uploadService } from './upload';
-import { localStore } from './localStore';
 import type { DeviceSyncTelemetry } from './deviceSync';
-import { CAMERA_VIDEO_MAX_DURATION } from '../constants/config';
+import { localStore } from './localStore';
+import { mediasoupClientService } from './mediasoupClient';
+import { uploadService } from './upload';
+
+const WEBRTC_REC_CACHE_SUBDIR = 'webrtc_recordings';
 
 class StreamingService {
   private deviceId: string = '';
@@ -22,6 +43,7 @@ class StreamingService {
   private deviceModel: string = '';
   private cameraName: string = 'Remote Camera';
   private telemetry: DeviceSyncTelemetry = {};
+  private activeWebrtcRecordingId: string | null = null;
 
   /**
    * Khởi tạo streaming service
@@ -62,6 +84,131 @@ class StreamingService {
   /** Telemetry recording/upload gửi kèm sync_device */
   public getTelemetry(): DeviceSyncTelemetry {
     return this.telemetry;
+  }
+
+  /** True nếu có thể ghi trực tiếp từ track WebRTC trên Android (không cần dừng preview). */
+  public canUseWebrtcTrackRecorder(): boolean {
+    return (
+      Platform.OS === 'android' &&
+      USE_WEBRTC_RECORDER_ON_ANDROID &&
+      WebrtcRecorder != null
+    );
+  }
+
+  public isWebrtcTrackRecording(): boolean {
+    return this.activeWebrtcRecordingId != null;
+  }
+
+  public isAnyRecording(): boolean {
+    return this.activeWebrtcRecordingId != null || cameraService.isVideoRecording_();
+  }
+
+  private getWebrtcRecorderOutputDir(): string {
+    const base = FileSystem.cacheDirectory ?? FileSystem.documentDirectory ?? '';
+    return `${base}${WEBRTC_REC_CACHE_SUBDIR}`;
+  }
+
+  /**
+   * M3 crash recovery: khi app mở lại sau khi bị kill giữa chừng, ghép các segment đã finalize
+   * trong thư mục tạm thành 1 file MP4 và đưa vào tab Files (localStore) để người dùng xem/upload.
+   */
+  public async recoverCrashedRecordings(): Promise<number> {
+    if (!this.canUseWebrtcTrackRecorder()) return 0;
+    try {
+      const list = await recoverOrphanedRecordings(this.getWebrtcRecorderOutputDir());
+      let count = 0;
+      for (const item of list) {
+        const saved = await localStore.saveCapturedMedia(item.uri, 'video');
+        if (saved) {
+          count++;
+          await deleteFile(item.uri);
+        }
+      }
+      if (count > 0) {
+        logger.info('Recovered crashed WebRTC recordings into localStore', { count });
+      }
+      return count;
+    } catch (e) {
+      logger.warn('recoverCrashedRecordings failed', e);
+      return 0;
+    }
+  }
+
+  /**
+   * Bắt đầu ghi MP4 trực tiếp từ track camera WebRTC đang phát preview (M4).
+   */
+  public async startWebrtcTrackRecording(): Promise<boolean> {
+    if (this.isAnyRecording()) {
+      logger.warn('Recording already in progress');
+      return false;
+    }
+    const videoTrack = mediasoupClientService.getLocalVideoTrack();
+    if (!videoTrack || !this.canUseWebrtcTrackRecorder()) {
+      logger.warn('startWebrtcTrackRecording: no active WebRTC videoTrack or module unavailable');
+      return false;
+    }
+    try {
+      mediasoupClientService.attachRecorderTap(videoTrack);
+      const res = await startWebrtcRecorder({
+        trackId: String(videoTrack.id ?? ''),
+        outputDir: this.getWebrtcRecorderOutputDir(),
+        width: WEBRTC_RECORDER_VIDEO_WIDTH,
+        height: WEBRTC_RECORDER_VIDEO_HEIGHT,
+        fps: WEBRTC_RECORDER_FPS,
+        videoBitrate: WEBRTC_RECORDER_VIDEO_BITRATE,
+        audioBitrate: WEBRTC_RECORDER_AUDIO_BITRATE,
+        segmentSeconds: WEBRTC_RECORDER_SEGMENT_SECONDS,
+      });
+      this.activeWebrtcRecordingId = res.recordingId;
+      this.lastUploadedUri = null;
+      this.recordingStartedAt = Date.now();
+      this.recordingDurationMs = null;
+      this.telemetry = { recording_state: 'recording' };
+      logger.info('WebRTC track recording started', {
+        recordingId: res.recordingId,
+        sessionId: this.currentSessionId,
+      });
+      return true;
+    } catch (e) {
+      logger.error('Failed to start WebRTC track recording', e);
+      return false;
+    }
+  }
+
+  /**
+   * Dừng ghi từ track WebRTC, ghép các segment thành 1 file MP4 và trả về uri.
+   */
+  public async stopWebrtcTrackRecording(): Promise<string | null> {
+    if (!this.activeWebrtcRecordingId || this.isStoppingRecording) {
+      return null;
+    }
+    const recId = this.activeWebrtcRecordingId;
+    this.isStoppingRecording = true;
+    try {
+      const res = await stopWebrtcRecorder(recId);
+      this.activeWebrtcRecordingId = null;
+      this.recordingDurationMs =
+        res.durationMs > 0
+          ? Math.round(res.durationMs)
+          : this.recordingStartedAt
+            ? Math.max(500, Date.now() - this.recordingStartedAt)
+            : 500;
+      this.telemetry = { recording_state: res.uri ? 'saved' : 'idle' };
+      logger.info('WebRTC track recording stopped', {
+        recordingId: recId,
+        uri: res.uri,
+        durationMs: this.recordingDurationMs,
+        size: res.size,
+      });
+      return res.uri;
+    } catch (e) {
+      logger.error('Failed to stop WebRTC track recording', e);
+      this.activeWebrtcRecordingId = null;
+      this.telemetry = { recording_state: 'idle' };
+      return null;
+    } finally {
+      this.isStoppingRecording = false;
+    }
   }
 
   /**
