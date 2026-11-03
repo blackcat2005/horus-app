@@ -7,6 +7,7 @@
 import { AppState, Platform } from 'react-native';
 import {
   USE_WEBRTC_RECORDER_ON_ANDROID,
+  USE_WEBRTC_RECORDER_ON_IOS,
   WEBRTC_PREVIEW_MAX_BITRATE,
   WEBRTC_PREVIEW_SCALE_DOWN_BY,
   WEBRTC_RECORDER_FPS,
@@ -27,8 +28,11 @@ import {
   stopProbe,
 } from './recorderProbe';
 
-const useAndroidRecorderCapture = () =>
-  Platform.OS === 'android' && USE_WEBRTC_RECORDER_ON_ANDROID && WebrtcRecorder != null;
+// WebRTC track recorder capture (modules/webrtc-recorder): Android + iOS.
+const isTrackRecorderCaptureEnabled = () =>
+  ((Platform.OS === 'android' && USE_WEBRTC_RECORDER_ON_ANDROID) ||
+    (Platform.OS === 'ios' && USE_WEBRTC_RECORDER_ON_IOS)) &&
+  WebrtcRecorder != null;
 
 // Lazy import để web (không có react-native-webrtc) vẫn tsc được
 let webrtc: any | null = null;
@@ -338,7 +342,7 @@ class MediasoupClientService {
       if (videoTrack && isProbeActive()) {
         // M0 experiment: tap frames, low-bitrate preview sender
         startProbe(videoTrack, () => this.videoProducer);
-      } else if (videoTrack && useAndroidRecorderCapture()) {
+      } else if (videoTrack && isTrackRecorderCaptureEnabled()) {
         // M4: attach raw-frame recorder tap on the 1080p30 track, produce low-bitrate preview
         this.attachRecorderTap(videoTrack);
       }
@@ -356,6 +360,9 @@ class MediasoupClientService {
           ),
         2000,
       );
+      // Debug: confirms the preview really carries mic audio (on iOS it comes from the custom
+      // WRAudioDevice, not WebRTC's built-in one).
+      setTimeout(() => void this.logAudioSendStats(), 5000);
     } catch (e) {
       // Start lần đầu lỗi thì trả lỗi cho UI như trước và nhả camera; không retry ngầm
       if (gen === this.gen) this.stopProducing();
@@ -373,7 +380,7 @@ class MediasoupClientService {
       (wrtc.mediaDevices as unknown as { getUserMedia: (c: unknown) => Promise<any> }).getUserMedia(
         c,
       );
-    const want1080p = isProbeActive() || useAndroidRecorderCapture();
+    const want1080p = isProbeActive() || isTrackRecorderCaptureEnabled();
     try {
       return await gum({
         audio: audioConstraints,
@@ -468,7 +475,7 @@ class MediasoupClientService {
         track: videoTrack,
         encodings: isProbeActive()
           ? PROBE_ENCODINGS
-          : useAndroidRecorderCapture()
+          : isTrackRecorderCaptureEnabled()
             ? [
                 {
                   maxBitrate: WEBRTC_PREVIEW_MAX_BITRATE,
@@ -486,6 +493,28 @@ class MediasoupClientService {
       const producer = await transport.produce({ track: audioTrack, stopTracks: false });
       if (gen !== this.gen) return;
       this.audioProducer = producer;
+    }
+  }
+
+  private async logAudioSendStats(): Promise<void> {
+    try {
+      const report = await this.audioProducer?.getStats();
+      report?.forEach((r: any) => {
+        if (r.type === 'outbound-rtp') {
+          logger.debug('[audio] preview send', {
+            packetsSent: r.packetsSent,
+            bytesSent: r.bytesSent,
+          });
+        } else if (r.type === 'media-source') {
+          // Non-zero energy means real mic samples, not silence.
+          logger.debug('[audio] preview source', {
+            audioLevel: r.audioLevel,
+            totalAudioEnergy: r.totalAudioEnergy,
+          });
+        }
+      });
+    } catch (e) {
+      logger.debug('[audio] getStats failed', e);
     }
   }
 
@@ -518,7 +547,7 @@ class MediasoupClientService {
       const newStream = await (
         wrtc.mediaDevices as unknown as { getUserMedia: (c: unknown) => Promise<any> }
       ).getUserMedia({
-        video: useAndroidRecorderCapture()
+        video: isTrackRecorderCaptureEnabled()
           ? {
               facingMode: this.facingMode,
               width: WEBRTC_RECORDER_VIDEO_WIDTH,
@@ -549,7 +578,7 @@ class MediasoupClientService {
     this.localStream.removeTrack(oldTrack);
     this.localStream.addTrack(newTrack);
     attachProbe(newTrack);
-    if (useAndroidRecorderCapture()) {
+    if (isTrackRecorderCaptureEnabled()) {
       this.attachRecorderTap(newTrack);
     }
     logger.info('switchCamera done ' + this.facingMode);

@@ -9,11 +9,12 @@ export const CAMERA_PHOTO_QUALITY = 0.8; // 0-1
 export const CAMERA_VIDEO_MAX_DURATION = 60; // giây tối đa cho một đoạn quay
 export const CAMERA_VIDEO_MAX_FILE_SIZE = 1_000_000_000; // byte — dưới giới hạn 1 GiB của server
 
-// Android WebRTC Track Recorder (modules/webrtc-recorder)
-// Khi bật (mặc định trên Android): một getUserMedia 1080p30 vừa phát preview bitrate thấp vừa
-// ghi MP4 full-quality từ raw frames, không cần dừng preview khi quay.
+// WebRTC Track Recorder (modules/webrtc-recorder, Android + iOS)
+// Khi bật (mặc định): một getUserMedia 1080p30 vừa phát preview bitrate thấp vừa
+// ghi MP4 full-quality (H.264 + AAC) từ raw frames, không cần dừng preview khi quay.
 // Đặt false để quay về nhánh fallback expo-camera (tạm dừng preview khi quay).
 export const USE_WEBRTC_RECORDER_ON_ANDROID = true;
+export const USE_WEBRTC_RECORDER_ON_IOS = true;
 export const WEBRTC_RECORDER_VIDEO_WIDTH = 1920;
 export const WEBRTC_RECORDER_VIDEO_HEIGHT = 1080;
 export const WEBRTC_RECORDER_FPS = 30;
